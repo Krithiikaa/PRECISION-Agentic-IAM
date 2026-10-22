@@ -1,0 +1,128 @@
+{
+  "_comment": [
+    "JIT TEMPORARY ACCESS POLICY CONFIGURATION (Phase 6). Configuration, not rules.",
+    "",
+    "The PAP pushes this document into OPA at data.agentic_iam.config.jit, and",
+    "policies/jit/issuance.rego and policies/jit/use.rego read it. The split is the",
+    "same one Phase 5.5 drew for loan thresholds: what a bound MEANS is a security",
+    "rule a reviewer reads in Rego; what the numbers ARE is an operational setting",
+    "a security committee changes without touching a rule.",
+    "",
+    "Nothing in Python reads these values. There is no `if ttl > x` anywhere in the",
+    "application -- the AEM carries a requested duration and OPA decides what to do",
+    "about it.",
+    "",
+    "FAILING CLOSED: if this document is absent from the engine, issuance denies",
+    "with JIT_POLICY_UNCONFIGURED rather than falling through. An unconfigured",
+    "maximum TTL must never read as 'unlimited' -- that is the single most",
+    "dangerous way for a configuration document to go missing, and it is exactly",
+    "the failure Phase 5.5 closed for loan thresholds."
+  ],
+  "max_ttl_seconds": 900,
+  "default_ttl_seconds": 300,
+  "max_uses": 5,
+  "default_max_uses": 3,
+  "jit_eligible_actions": {
+    "_comment": [
+      "WHICH ACTIONS MAY BE MANDATED AT ALL. An allow-list, never a deny-list: an",
+      "action nobody has analysed for reuse is not eligible, which is the safe",
+      "direction for a list that will be added to over time.",
+      "",
+      "`read` on credit_records is the Phase 6 demonstration: a risk agent doing a",
+      "loan assessment reads several customers' credit profiles in one piece of",
+      "work, and making it re-authorise identically five times is ceremony rather",
+      "than control. Every read is STILL decided by the PDP -- the mandate removes",
+      "nothing but the repeated issuance.",
+      "",
+      "DELIBERATELY ABSENT: approve_loan, disburse_funds and override_decision.",
+      "These are the Phase 5.5 human-approval actions, and they are excluded from",
+      "JIT entirely. The reasoning is in the `excluded_actions` note below and it",
+      "is the most important security decision in this phase.",
+      "",
+      "`read` on loan_applications joined in Phase 6 so the mandate's financial",
+      "ceiling (max_amount_inr below) has a live path. It is a READ, not an",
+      "approval: it carries an amount, so the ceiling is exercised on every use,",
+      "and it touches nothing in the dual-control boundary. An agent holding such",
+      "a mandate still cannot approve any loan, at any amount."
+    ],
+    "read": [
+      "credit_records",
+      "loan_applications"
+    ]
+  },
+  "excluded_actions": {
+    "_comment": [
+      "WHY approve_loan IS NOT JIT-ELIGIBLE, recorded here because a future",
+      "operator WILL be asked to add it and should be able to read the reasoning",
+      "before they do.",
+      "",
+      "A mandate carries a human decision forward across several actions. For a",
+      "loan approval that is precisely the thing Phase 5.5 exists to prevent: one",
+      "officer's approval covering a burst of loans would defeat maker-checker,",
+      "and a mandate issued while an amount sat in the single-approver band could",
+      "be spent on an application that has since moved into the dual-control band.",
+      "",
+      "The amount band IS re-evaluated on every use, so the second failure is",
+      "caught -- but the first is not a policy question, it is a question about",
+      "what an approval MEANT, and a human who approved one loan did not approve",
+      "five. Excluding the action is the honest answer; relying on the band check",
+      "would be trusting a backstop to carry a decision nobody made.",
+      "",
+      "If this is ever revisited, the mandate must be scoped to explicit",
+      "resource_ids and carry a max_amount_inr ceiling at or below the",
+      "single-approver limit, and the approval must have been given for that",
+      "exact set. Until that is designed and tested, the answer is no.",
+      "",
+      "PHASE 7 ADDS `execute_payment`, for the same reason and with the same",
+      "force as approve_loan. A mandate carries an authorization forward across",
+      "several actions; a human who approved one payment did not approve five,",
+      "and a mandate issued while an instruction sat in the autonomous band",
+      "could be spent on one that has since moved into the dual-control band.",
+      "It is also absent from the allow-list above, so there are two",
+      "independent refusals."
+    ],
+    "actions": [
+      "approve_loan",
+      "disburse_funds",
+      "override_decision",
+      "execute_payment"
+    ]
+  },
+  "require_explicit_resource_ids": {
+    "_comment": [
+      "A mandate with no resource_ids covers the resource TYPE and leaves",
+      "instances to policy. That is genuinely weaker than naming them, so it is a",
+      "configured choice rather than an accident of an empty list.",
+      "",
+      "false here: for `read` on credit_records the per-use PDP evaluation already",
+      "checks the credential's allowedResources, so a type-scoped mandate cannot",
+      "reach a record the agent could not have read anyway. An action where that",
+      "is not true should set this true."
+    ],
+    "enabled": false
+  },
+  "require_approval_for_issuance": {
+    "_comment": [
+      "Whether a mandate may only be issued when a human approval already exists",
+      "and is valid.",
+      "",
+      "false for the shipped eligible action, because `read` on credit_records is",
+      "not an escalated action -- it is permitted on the agent's own credential,",
+      "and requiring an approval to mandate something that needs no approval would",
+      "be ceremony. Any action that DOES escalate cannot be mandated without one:",
+      "issuance runs the full PDP evaluation, so a HUMAN_APPROVAL_REQUIRED verdict",
+      "refuses the mandate outright. That is structural, not configured."
+    ],
+    "enabled": false
+  },
+  "max_amount_inr": {
+    "_comment": [
+      "A ceiling applied to any mandate over a resource that carries an amount.",
+      "Compared against the LIVE server-side attributes on every use, never",
+      "against a caller's claim. Set at the Phase 5.5 agent autonomous limit so a",
+      "mandate can never be used to act above what an agent could already do on",
+      "its own authority."
+    ],
+    "value": 1000000
+  }
+}

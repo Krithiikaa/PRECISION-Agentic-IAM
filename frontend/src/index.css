@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: #0a0e14;
+  color: #d7dce5;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-feature-settings: "tnum";
+}
+
+.mono {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}

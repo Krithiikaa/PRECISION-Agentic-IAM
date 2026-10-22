@@ -1,0 +1,180 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 940" width="1180" height="940" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-deny" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f43f5e"/>
+    </marker>
+    <marker id="arrow-allow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#10b981"/>
+    </marker>
+    <marker id="arrow-human" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#f59e0b"/>
+    </marker>
+    <style>
+      .box   { fill:#0f172a; stroke:#334155; stroke-width:1.2; rx:6; }
+      .human { fill:#1c1408; stroke:#a16207; stroke-width:1.2; rx:6; }
+      .authz { fill:#140f22; stroke:#7c3aed; stroke-width:1.2; rx:6; }
+      .res   { fill:#0a1a14; stroke:#0f766e; stroke-width:1.2; rx:6; }
+      .t     { fill:#e2e8f0; font-size:13px; font-weight:600; }
+      .s     { fill:#94a3b8; font-size:10.5px; }
+      .m     { fill:#64748b; font-size:9.5px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .lbl   { fill:#94a3b8; font-size:10px; }
+      .deny  { fill:#fda4af; font-size:10px; font-weight:600; }
+      .allow { fill:#6ee7b7; font-size:10px; font-weight:600; }
+      .hum   { fill:#fcd34d; font-size:10px; font-weight:600; }
+      .hdr   { fill:#f1f5f9; font-size:15px; font-weight:700; }
+      .note  { fill:#64748b; font-size:10px; font-style:italic; }
+      .flow  { stroke:#64748b; stroke-width:1.4; fill:none; }
+      .flowd { stroke:#f43f5e; stroke-width:1.4; fill:none; }
+      .flowa { stroke:#10b981; stroke-width:1.6; fill:none; }
+      .flowh { stroke:#f59e0b; stroke-width:1.4; fill:none; }
+      .dash  { stroke-dasharray:4 3; }
+    </style>
+  </defs>
+
+  <rect width="1180" height="940" fill="#020617"/>
+  <text x="30" y="34" class="hdr">Phase 5 — Human-in-the-Loop Authorization</text>
+  <text x="30" y="53" class="s">A human decision is EVIDENCE the PDP re-evaluates. It is never an ALLOW on its own, and it never touches the resource.</text>
+
+  <!-- ================= data plane column ================= -->
+  <text x="30" y="92" class="lbl">DATA PLANE — the agent's attempt</text>
+
+  <rect x="30" y="104" width="210" height="52" class="box"/>
+  <text x="42" y="126" class="t">Risk Analysis Agent</text>
+  <text x="42" y="143" class="m">did:poc:agent:risk-001</text>
+
+  <path d="M135 156 L135 190" class="flow" marker-end="url(#arrow)"/>
+  <text x="145" y="177" class="lbl">approve_loan · loan-7842</text>
+
+  <rect x="30" y="190" width="210" height="52" class="box"/>
+  <text x="42" y="212" class="t">AEM</text>
+  <text x="42" y="229" class="s">enforcement boundary</text>
+
+  <path d="M135 242 L135 276" class="flow" marker-end="url(#arrow)"/>
+
+  <rect x="30" y="276" width="210" height="66" class="authz"/>
+  <text x="42" y="298" class="t">PDP</text>
+  <text x="42" y="314" class="s">first evaluation</text>
+  <text x="42" y="330" class="m">PIP: credential + approval facts</text>
+
+  <path d="M135 342 L135 376" class="flow" marker-end="url(#arrow)"/>
+
+  <rect x="30" y="376" width="210" height="66" class="authz"/>
+  <text x="42" y="398" class="t">OPA · Rego</text>
+  <text x="42" y="414" class="m">security/sensitive.rego</text>
+  <text x="42" y="430" class="m">security/human_approval.rego</text>
+
+  <path d="M240 409 L318 409" class="flowh" marker-end="url(#arrow-human)"/>
+  <text x="250" y="401" class="hum">HUMAN_APPROVAL_REQUIRED</text>
+  <text x="250" y="424" class="note">the tool is not called</text>
+
+  <!-- ================= human column ================= -->
+  <text x="330" y="92" class="lbl">HUMAN PATH — who is this person, and what did they agree to?</text>
+
+  <rect x="330" y="104" width="240" height="66" class="human"/>
+  <text x="342" y="126" class="t">HITL service</text>
+  <text x="342" y="142" class="s">opens an approval request</text>
+  <text x="342" y="158" class="m">binding = sha256(request·agent·action·</text>
+
+  <rect x="330" y="376" width="240" height="66" class="human"/>
+  <text x="342" y="398" class="t">Approval request</text>
+  <text x="342" y="414" class="s">agent · action · resource · amount</text>
+  <text x="342" y="430" class="s">purpose · reason · expiry</text>
+
+  <path d="M450 376 L450 340" class="flowh" marker-end="url(#arrow-human)"/>
+  <path d="M450 240 L450 200" class="flowh" marker-end="url(#arrow-human)"/>
+
+  <rect x="330" y="240" width="240" height="66" class="human"/>
+  <text x="342" y="262" class="t">Approval UI</text>
+  <text x="342" y="278" class="s">shows exactly what is being approved</text>
+  <text x="342" y="294" class="note">no blind approval</text>
+
+  <path d="M570 273 L648 273" class="flowh" marker-end="url(#arrow-human)"/>
+  <text x="578" y="265" class="lbl">sign in</text>
+
+  <rect x="648" y="240" width="230" height="66" class="human"/>
+  <text x="660" y="262" class="t">Keycloak</text>
+  <text x="660" y="278" class="s">OIDC · Authorization Code + PKCE</text>
+  <text x="660" y="294" class="m">RS256 · JWKS · iss · aud · exp</text>
+
+  <path d="M763 240 L763 200" class="flowh dash" marker-end="url(#arrow-human)"/>
+  <rect x="648" y="134" width="230" height="66" class="box"/>
+  <text x="660" y="156" class="t">Enterprise IdP</text>
+  <text x="660" y="172" class="s">SAML federation</text>
+  <text x="660" y="188" class="note">documented path — not implemented</text>
+
+  <path d="M763 306 L763 344" class="flowh" marker-end="url(#arrow-human)"/>
+  <rect x="648" y="344" width="230" height="80" class="human"/>
+  <text x="660" y="366" class="t">Loan officer</text>
+  <text x="660" y="382" class="m">realm role LOAN_OFFICER</text>
+  <text x="660" y="400" class="s">IAM_ADMIN cannot approve loans.</text>
+  <text x="660" y="415" class="s">AUDITOR approves nothing.</text>
+
+  <path d="M763 424 L763 470" class="flowh" marker-end="url(#arrow-human)"/>
+  <text x="772" y="450" class="hum">APPROVE / REJECT</text>
+
+  <!-- ================= artifact ================= -->
+  <rect x="600" y="470" width="326" height="118" class="human"/>
+  <text x="612" y="492" class="t">Approval artifact</text>
+  <text x="612" y="510" class="m">signed by did:poc:service:approval-authority</text>
+  <text x="612" y="526" class="m">proofPurpose: humanApproval</text>
+  <text x="612" y="544" class="s">bound to: request · agent · action · resource · purpose</text>
+  <text x="612" y="560" class="s">single-use · expiring · audience-bound</text>
+  <text x="612" y="578" class="note">NOT signed by the agent. NOT signed by Keycloak.</text>
+
+  <path d="M600 529 L250 529" class="flowh" marker-end="url(#arrow-human)"/>
+  <text x="300" y="521" class="lbl">agent retries the SAME request_id</text>
+
+  <!-- ================= re-evaluation ================= -->
+  <rect x="30" y="500" width="210" height="66" class="authz"/>
+  <text x="42" y="522" class="t">PDP — AGAIN</text>
+  <text x="42" y="538" class="s">re-evaluation, with the approval</text>
+  <text x="42" y="554" class="m">AUTHORIZATION_REEVALUATED</text>
+
+  <path d="M135 566 L135 604" class="flow" marker-end="url(#arrow)"/>
+
+  <rect x="30" y="604" width="210" height="66" class="authz"/>
+  <text x="42" y="626" class="t">OPA · Rego</text>
+  <text x="42" y="642" class="m">loan/approval.rego</text>
+  <text x="42" y="658" class="s">credential AND approval required</text>
+
+  <path d="M135 670 L135 712" class="flowa" marker-end="url(#arrow-allow)"/>
+  <text x="145" y="695" class="allow">ALLOW</text>
+
+  <path d="M240 637 L360 637" class="flowd" marker-end="url(#arrow-deny)"/>
+  <text x="250" y="629" class="deny">DENY</text>
+  <rect x="360" y="596" width="300" height="86" class="box"/>
+  <text x="372" y="617" class="s">APPROVAL_REJECTED · APPROVAL_EXPIRED</text>
+  <text x="372" y="634" class="s">APPROVAL_ALREADY_CONSUMED</text>
+  <text x="372" y="651" class="s">APPROVAL_BINDING_MISMATCH</text>
+  <text x="372" y="668" class="s">APPROVAL_SIGNATURE_INVALID · AUTHORITY_UNKNOWN</text>
+
+  <rect x="30" y="712" width="210" height="52" class="box"/>
+  <text x="42" y="734" class="t">AEM</text>
+  <text x="42" y="751" class="s">consumes the approval, mints a grant</text>
+
+  <path d="M135 764 L135 800" class="flowa" marker-end="url(#arrow-allow)"/>
+
+  <rect x="30" y="800" width="210" height="66" class="res"/>
+  <text x="42" y="822" class="t">Protected tool</text>
+  <text x="42" y="838" class="m">approve_loan_application</text>
+  <text x="42" y="856" class="s">loan-7842 · ₹25,00,000</text>
+
+  <!-- ================= separation panel ================= -->
+  <rect x="700" y="620" width="450" height="246" fill="#0b1220" stroke="#1e293b" stroke-width="1.2" rx="6"/>
+  <text x="716" y="646" class="t">What stays separate</text>
+
+  <text x="716" y="674" class="s"><tspan fill="#e2e8f0" font-weight="600">Agent credential</tspan> — the issuer says the agent has a capability</text>
+  <text x="716" y="694" class="s"><tspan fill="#e2e8f0" font-weight="600">Human identity</tspan> — Keycloak says this is Priya Raman</text>
+  <text x="716" y="714" class="s"><tspan fill="#e2e8f0" font-weight="600">Human approval</tspan> — Priya agreed to THIS action, once</text>
+  <text x="716" y="734" class="s"><tspan fill="#e2e8f0" font-weight="600">Authorization</tspan> — the PDP says it may proceed</text>
+  <text x="716" y="754" class="s"><tspan fill="#e2e8f0" font-weight="600">Enforcement</tspan> — the AEM lets the tool run</text>
+
+  <line x1="716" y1="772" x2="1134" y2="772" stroke="#1e293b" stroke-width="1"/>
+  <text x="716" y="794" class="note">An OIDC token is not an approval.</text>
+  <text x="716" y="812" class="note">An approval is not a credential, and grants no standing permission.</text>
+  <text x="716" y="830" class="note">A human role is not an agent capability — different trust domains.</text>
+  <text x="716" y="852" class="note">Approving once does not permit the next action.</text>
+</svg>

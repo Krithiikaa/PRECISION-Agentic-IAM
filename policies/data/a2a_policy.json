@@ -1,0 +1,114 @@
+{
+  "_comment": [
+    "A2A TRANSACTION POLICY CONFIGURATION (Phase 7). Configuration, not rules.",
+    "",
+    "The PAP pushes this document into OPA at data.agentic_iam.config.a2a, and",
+    "policies/a2a/transaction.rego reads it. The split is the one Phase 5.5 drew",
+    "for loan thresholds and Phase 6 drew for mandate bounds: what an amount",
+    "MEANS is a security rule a reviewer reads in Rego; what the numbers ARE is",
+    "a treasury decision a risk committee changes without touching a rule.",
+    "",
+    "Nothing in Python reads these values. There is no `if amount > x` anywhere",
+    "in the application -- the PIP establishes the amount from the instruction",
+    "record and OPA decides what to do about it.",
+    "",
+    "FAILING CLOSED: if this document is absent from the engine,",
+    "a2a/transaction.rego denies with A2A_POLICY_UNCONFIGURED rather than",
+    "falling through. An unconfigured threshold must never read as 'no limit'.",
+    "",
+    "Amounts are whole rupees (INR), as integers. Canonical JSON refuses floats,",
+    "so a fractional amount cannot be signed in the first place."
+  ],
+  "currency": "INR",
+  "thresholds": {
+    "_comment": [
+      "agent_autonomous_limit_inr -- at or below this, a sending agent holding",
+      "a valid capability credential scoped to payment_instructions may have",
+      "its instruction carried out on its own authority. No human is involved,",
+      "because referring every small payment to a person produces",
+      "rubber-stamping, which is worse than not asking.",
+      "",
+      "single_approver_limit_inr -- above the autonomous limit and at or below",
+      "this, ONE authorized PAYMENT_OFFICER must approve.",
+      "",
+      "Above single_approver_limit_inr -- TWO distinct authorized humans. The",
+      "same person cannot satisfy both: the database refuses the second",
+      "sign-off, the artifact verifier refuses a document naming one person",
+      "twice, and a2a/transaction.rego counts the distinct approvers inside",
+      "the VERIFIED artifact rather than trusting a stored number."
+    ],
+    "agent_autonomous_limit_inr": 100000,
+    "single_approver_limit_inr": 1000000
+  },
+  "roles": {
+    "_comment": [
+      "Which human role may approve a payment. A DEDICATED role, deliberately",
+      "not LOAN_OFFICER: a loan officer's authority is over lending decisions,",
+      "and letting it extend to moving money would be privilege creep arriving",
+      "as a side effect. The RULE that reads it lives in",
+      "policies/control_plane/humans.rego."
+    ],
+    "approver": "PAYMENT_OFFICER"
+  },
+  "separation_of_duties": {
+    "_comment": [
+      "Maker-checker. The officer named as submitted_by on the instruction may",
+      "not sign it off. Enforced by the SAME rule that enforces it for loans --",
+      "cp-humans reads data.agentic_iam.config.loan.separation_of_duties, so",
+      "the switch below is recorded for review and the live rule is the loan",
+      "one. Kept here so a reader of this file is not left believing payments",
+      "have their own switch."
+    ],
+    "prohibit_self_approval": true,
+    "enforced_by": "policies/control_plane/humans.rego, via data.agentic_iam.config.loan"
+  },
+  "a2a_eligible_actions": {
+    "_comment": [
+      "WHICH ACTIONS MAY BE INSTRUCTED AGENT-TO-AGENT AT ALL. An allow-list,",
+      "never a deny-list: an action nobody has analysed for remote instruction",
+      "is not eligible, which is the safe direction for a list that will be",
+      "added to over time.",
+      "",
+      "`execute_payment` on `payment_instructions` is the Phase 7 subject: one",
+      "agent asks another to settle a payment, the amount is material, and the",
+      "whole reconciliation chain has something real to run against.",
+      "",
+      "DELIBERATELY ABSENT: approve_loan, disburse_funds and override_decision.",
+      "Those are the Phase 5.5 human-approval actions on a DIFFERENT resource",
+      "with a DIFFERENT dual-control boundary, and letting an A2A instruction",
+      "reach them would mean one sender could drive the loan approval flow",
+      "through a channel it was never analysed for.",
+      "",
+      "Also absent: `read`. An agent asking another agent to read a record on",
+      "its behalf is the confused-deputy shape, and it needs its own analysis",
+      "before it is enabled rather than being permitted because it looks",
+      "harmless."
+    ],
+    "execute_payment": [
+      "payment_instructions"
+    ]
+  },
+  "jit": {
+    "_comment": [
+      "execute_payment is NOT JIT-eligible, and is excluded BY NAME in",
+      "policies/data/jit_policy.json as well as by omission from that file's",
+      "allow-list. Two independent refusals, for the reason approve_loan has",
+      "two: a mandate carries an authorization forward across several actions,",
+      "and a human who approved one payment did not approve five.",
+      "",
+      "Recorded here as well so an operator reading the A2A configuration",
+      "learns it without having to go and check the JIT one."
+    ],
+    "eligible": false
+  },
+  "max_envelope_ttl_seconds": {
+    "_comment": [
+      "Recorded for review. The CEILING that is actually enforced is",
+      "A2A_MAX_TTL_SECONDS in application settings, applied during envelope",
+      "verification -- before OPA is reached, because an envelope with an",
+      "absurd window should be refused without a policy round trip. Policy",
+      "cannot be more permissive than it."
+    ],
+    "value": 300
+  }
+}

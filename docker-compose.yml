@@ -1,0 +1,349 @@
+# Agentic IAM POC - Phase 1 (identity plane).
+#
+# Services present because they are actually used today:
+#   postgres  - agent identity persistence
+#   redis     - started now, consumed from Phase 9 (Session State Synchroniser)
+#   iam-api   - the IAM control plane
+#   <agent>   - one real process per agent
+#
+#   ans       - the Agent Naming Service (Phase 3)
+#   frontend  - the console (discovery + credentials)
+#
+# Services that will join in later phases: opa (Phase 4) and mcp-gateway
+# (Phase 8). They are not declared here yet, because a service that does
+# nothing would misrepresent what runs.
+
+name: agentic-iam
+
+x-agent-common: &agent-common
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  environment: &agent-env
+    ENV: ${ENV:-development}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-iam}:${POSTGRES_PASSWORD:-iam}@postgres:5432/${POSTGRES_DB:-agentic_iam}
+    REDIS_URL: redis://redis:6379/0
+    KEYSTORE_MASTER_KEY: ${KEYSTORE_MASTER_KEY:?KEYSTORE_MASTER_KEY must be set}
+    ORGANIZATION_DID: ${ORGANIZATION_DID:-did:poc:organization:bank-demo}
+    OLLAMA_BASE_URL: ${OLLAMA_BASE_URL_DOCKER:-http://host.docker.internal:11434}
+    OLLAMA_MODEL: ${OLLAMA_MODEL:?OLLAMA_MODEL must be set}
+    IAM_API_URL: http://iam-api:8000
+    ANS_URL: http://ans:8100
+    ANS_BASE_URL: http://ans:8100
+    # Phase 4. Service DNS, not localhost: inside a container localhost is
+    # that container, so an OPA on the host would be unreachable and every
+    # authorization would fail closed.
+    OPA_URL: http://opa:8181
+    POLICY_DIR: /app/policies
+    # Phase 5. Inside compose Keycloak is a service name; a host run reaches it
+    # on localhost. The ISSUER must match what Keycloak puts in the token's
+    # `iss` claim, or every token is refused -- which is why it is configured
+    # explicitly rather than derived from the base URL.
+    KEYCLOAK_BASE_URL: http://keycloak:8080
+    KEYCLOAK_ISSUER: http://localhost:8080/realms/agentic-iam
+    AGENT_KEYSTORE_DIR: /keystore-agents
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  depends_on:
+    iam-api:
+      condition: service_healthy
+    ans:
+      condition: service_healthy
+  restart: unless-stopped
+  command: ["python", "-m", "app.agents.service"]
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-iam}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-iam}
+      POSTGRES_DB: ${POSTGRES_DB:-agentic_iam}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-iam} -d ${POSTGRES_DB:-agentic_iam}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- Phase 4: the real policy engine -------------------------------------
+  # This is the actual Open Policy Agent runtime, not a stand-in. The PDP calls
+  # it over HTTP and has no local evaluation path: if this service is down,
+  # every authorization decision is DENY.
+  opa:
+    image: openpolicyagent/opa:latest
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      # Bound to all interfaces inside the container only; the published port
+      # is what the host test suite and the API reach.
+      - "--log-level=info"
+      - "--set=decision_logs.console=true"
+    ports:
+      # PHASE 4.5 -- OPA BOUNDARY. Bound to the LOOPBACK interface only.
+      #
+      # `8181:8181` publishes on 0.0.0.0, which exposes OPA's ADMINISTRATIVE
+      # API -- PUT/DELETE /v1/policies -- to anything that can route to this
+      # host. Anyone reaching it could load a rule granting themselves
+      # everything, and the PDP would faithfully enforce it. The IAM control
+      # plane's own policy authorization would be irrelevant, because the
+      # attacker never goes through it.
+      #
+      # It stays published on 127.0.0.1 because a HOST-run backend and the host
+      # test suite must reach the same engine the containers use. In a real
+      # deployment this port is not published at all: OPA is reachable only on
+      # the compose network, and every policy change goes through the PAP.
+      #
+      #     caller -> IAM control plane -> PAP/PDP -> OPA        (supported)
+      #     caller -> OPA admin API                              (not reachable)
+      - "127.0.0.1:8181:8181"
+    healthcheck:
+      # OPA's own health endpoint. `opa` has no shell, so this uses the binary.
+      test: ["CMD", "/opa", "eval", "--fail", "1 == 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+  # --- Phase 5: the real identity provider for HUMANS ----------------------
+  # Keycloak authenticates PEOPLE. It does not authenticate agents (that is
+  # Phase 1 DID + Ed25519) and it does not authorize anything (that is the PDP).
+  # It answers exactly one question: "who is this human?".
+  #
+  # The realm is imported from ./keycloak so the demo identities, roles and the
+  # audience mapper are versioned with the code rather than clicked into a
+  # container that a `docker compose down -v` would erase.
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm", "--http-port=8080"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HEALTH_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      # This POC runs on a 6 GiB host that also runs Ollama. Capping the heap
+      # keeps Keycloak inside ~1 GiB instead of sizing itself to the machine.
+      JAVA_OPTS_KC_HEAP: "-Xms256m -Xmx512m"
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    ports:
+      # Published on loopback for the same reason OPA is: the human login page
+      # must be reachable from this host's browser, and from nowhere else.
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      # Keycloak 26 serves health on the management port (9000) and has no
+      # shell or curl in the image, so this uses the JVM's own HTTP client.
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && cat <&3 | grep -q '\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  iam-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      <<: *agent-env
+      KEYSTORE_DIR: /keystore
+      API_PUBLIC_URL: http://localhost:8000
+    ports:
+      - "8000:8000"
+    volumes:
+      # KEY CUSTODY: this is the container's own keystore, separate from the
+      # host's ./backend/.keystore. Because the database is shared but the
+      # keystore is not, a compose deployment pointed at a database seeded by a
+      # host run can VERIFY every existing credential (public keys live in the
+      # DB) but cannot ISSUE from those issuers - it does not hold their
+      # private keys, and says so rather than pretending. Use one deployment
+      # style at a time, or mount the same keystore into both.
+      - keystore-data:/keystore
+      # The PAP reads policy source from here and pushes it into OPA. Read-only:
+      # the running service manages policy LIFECYCLE, it does not author rules.
+      - ./policies:/app/policies:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    # Migrations run on start so a fresh volume is usable immediately. The PAP
+    # then loads the policy set into OPA during application startup.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  ans:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      <<: *agent-env
+      KEYSTORE_DIR: /keystore
+      ANS_HOST: 0.0.0.0
+      ANS_PORT: "8100"
+    ports:
+      - "8100:8100"
+    volumes:
+      # The ANS reads DID Documents and verifies credentials, both of which
+      # need only PUBLIC keys from the database. It shares the keystore volume
+      # so a single deployment has one key custody story, but it never signs.
+      #
+      # DEPLOYMENT NOTE: agents register the endpoint they were told to
+      # advertise (AGENT_PUBLIC_URL). In compose that is a service name such as
+      # http://risk-agent:9003; in a host run it is http://localhost:9003. If
+      # you point a compose ANS at a database seeded by a host run, it will
+      # probe localhost from inside its own container, fail, and mark every
+      # agent DEGRADED. That is the prober being truthful about reachability,
+      # not a fault -- but run one deployment style at a time.
+      - keystore-data:/keystore
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      iam-api:
+        condition: service_healthy
+    command: ["python", "-m", "app.ans.service"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health', timeout=3).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+
+  coordinator-agent:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: coordinator-001
+      AGENT_PORT: "9001"
+      AGENT_PUBLIC_URL: http://coordinator-agent:9001
+    ports: ["9001:9001"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  kyc-agent:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: kyc-001
+      AGENT_PORT: "9002"
+      AGENT_PUBLIC_URL: http://kyc-agent:9002
+    ports: ["9002:9002"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  risk-agent:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: risk-001
+      AGENT_PORT: "9003"
+      AGENT_PUBLIC_URL: http://risk-agent:9003
+    ports: ["9003:9003"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  fraud-agent:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: fraud-001
+      AGENT_PORT: "9004"
+      AGENT_PUBLIC_URL: http://fraud-agent:9004
+    ports: ["9004:9004"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  risk-agent-2:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: risk-002
+      AGENT_PORT: "9006"
+      AGENT_PUBLIC_URL: http://risk-agent-2:9006
+    ports: ["9006:9006"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  risk-agent-3:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: risk-003
+      AGENT_PORT: "9007"
+      AGENT_PUBLIC_URL: http://risk-agent-3:9007
+    ports: ["9007:9007"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  decision-agent:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: decision-001
+      AGENT_PORT: "9005"
+      AGENT_PUBLIC_URL: http://decision-agent:9005
+    ports: ["9005:9005"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  # Phase 7. The receiver of agent-to-agent payment instructions.
+  #
+  # It decides nothing: it proves it is the addressee with a control-plane
+  # proof signed by its own key, and relays the envelope UNCHANGED to the IAM
+  # plane. Relaying unchanged is not a convention -- every field is inside
+  # the sender's signature, so a receiver that edited one would invalidate
+  # the instruction rather than widen it.
+  payments-agent:
+    <<: *agent-common
+    environment:
+      <<: *agent-env
+      AGENT_SLUG: payments-001
+      AGENT_PORT: "9008"
+      AGENT_PUBLIC_URL: http://payments-agent:9008
+    ports: ["9008:9008"]
+    volumes: [agent-keystore:/keystore-agents]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_TARGET: http://iam-api:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      iam-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  keystore-data:
+  agent-keystore:

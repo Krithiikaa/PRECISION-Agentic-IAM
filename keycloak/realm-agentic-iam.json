@@ -1,0 +1,200 @@
+{
+  "realm": "agentic-iam",
+  "enabled": true,
+  "displayName": "Agentic IAM (POC)",
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "accessTokenLifespan": 900,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 36000,
+  "roles": {
+    "realm": [
+      {
+        "name": "IAM_ADMIN",
+        "description": "Manages agent identities, credentials and policy. Does NOT approve loans."
+      },
+      {
+        "name": "LOAN_OFFICER",
+        "description": "Approves high-value loan decisions. Has NO authority over IAM."
+      },
+      {
+        "name": "AUDITOR",
+        "description": "Reads the audit trail. Approves nothing and changes nothing."
+      },
+      {
+        "name": "PAYMENT_OFFICER",
+        "description": "Approves agent-to-agent payment instructions (Phase 7). A DEDICATED role, deliberately not LOAN_OFFICER: approving a lending decision and approving the movement of money are different authorities, and neither is a superset of the other. Has NO authority over IAM and cannot approve a loan."
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "agentic-iam-console",
+      "name": "Agentic IAM Console",
+      "description": "The human-facing console. Public client, Authorization Code + PKCE.",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:5173/*##http://localhost:8000/*"
+      },
+      "redirectUris": [
+        "http://localhost:5173/*",
+        "http://localhost:3000/*",
+        "http://localhost:8000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://localhost:8000",
+        "+"
+      ],
+      "protocolMappers": [
+        {
+          "name": "agentic-iam-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "agentic-iam-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "loan.officer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Priya",
+      "lastName": "Raman",
+      "email": "loan.officer@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "loan-officer-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "LOAN_OFFICER"
+      ]
+    },
+    {
+      "username": "loan.officer.2",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Vikram",
+      "lastName": "Iyer",
+      "email": "loan.officer.2@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "loan-officer-2-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "LOAN_OFFICER"
+      ]
+    },
+    {
+      "username": "iam.admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Arun",
+      "lastName": "Krishnan",
+      "email": "iam.admin@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "iam-admin-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "IAM_ADMIN"
+      ]
+    },
+    {
+      "username": "auditor",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Meera",
+      "lastName": "Nair",
+      "email": "auditor@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "auditor-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "AUDITOR"
+      ]
+    },
+    {
+      "username": "no.roles",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Sam",
+      "lastName": "Unassigned",
+      "email": "no.roles@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "no-roles-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": []
+    },
+    {
+      "username": "payment.officer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Anil",
+      "lastName": "Kapoor",
+      "email": "payment.officer@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "payment-officer-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "PAYMENT_OFFICER"
+      ]
+    },
+    {
+      "username": "payment.officer.2",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Meera",
+      "lastName": "Nair",
+      "email": "payment.officer.2@bank-demo.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "payment-officer-2-demo",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "PAYMENT_OFFICER"
+      ]
+    }
+  ]
+}

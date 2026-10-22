@@ -1,0 +1,25 @@
+# --- Secrets: key material must never be committed ---
+.env
+.keystore/
+.keystore-agents/
+*.key.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- Node ---
+node_modules/
+dist/
+.vite/
+
+# --- Misc ---
+.DS_Store
+*.log
+
+# --- Runtime state (pids, logs) ---
+.run/

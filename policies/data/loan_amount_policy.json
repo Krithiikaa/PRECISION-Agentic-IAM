@@ -1,0 +1,55 @@
+{
+  "_comment": [
+    "AMOUNT-BASED APPROVAL THRESHOLDS. Policy CONFIGURATION, not policy rules.",
+    "",
+    "The PAP pushes this document into OPA at data.agentic_iam.config.loan, and",
+    "policies/loan/amount.rego reads it. The split is deliberate: what an amount",
+    "MEANS is a security rule that a reviewer reads in Rego; what the numbers ARE",
+    "is a lending decision that a risk committee changes without touching a rule.",
+    "",
+    "Nothing in Python reads these values. There is no `if amount > x` anywhere in",
+    "the application -- the PIP establishes the amount from the resource record and",
+    "OPA decides what to do about it.",
+    "",
+    "FAILING CLOSED: if this document is absent from the engine, loan/amount.rego",
+    "denies with LOAN_POLICY_UNCONFIGURED rather than falling through. An",
+    "unconfigured threshold must never read as 'no limit'.",
+    "",
+    "Amounts are minor-unit-free whole rupees (INR)."
+  ],
+  "currency": "INR",
+  "thresholds": {
+    "_comment": [
+      "agent_autonomous_limit_inr -- at or below this, an agent holding a valid",
+      "capability credential scoped to loan_applications may record the decision",
+      "on its own authority. No human is involved, because referring every",
+      "trivial loan to a person produces rubber-stamping, which is worse than not",
+      "asking.",
+      "",
+      "single_approver_limit_inr -- above the autonomous limit and at or below",
+      "this, ONE authorized LOAN_OFFICER must approve. This is the loan officer's",
+      "personal approval authority.",
+      "",
+      "Above single_approver_limit_inr -- TWO distinct authorized humans. The same",
+      "person cannot satisfy both."
+    ],
+    "agent_autonomous_limit_inr": 1000000,
+    "single_approver_limit_inr": 5000000
+  },
+  "roles": {
+    "_comment": [
+      "Which human role may approve a loan decision. Stated here so the role and",
+      "the amount bands are configured together; the RULE that reads it lives in",
+      "policies/control_plane/humans.rego."
+    ],
+    "approver": "LOAN_OFFICER"
+  },
+  "separation_of_duties": {
+    "_comment": [
+      "Maker-checker. When true, the officer named as submitted_by on the",
+      "application may not sign it off. Turning it off is a deliberate,",
+      "reviewable configuration change rather than something a code path decides."
+    ],
+    "prohibit_self_approval": true
+  }
+}

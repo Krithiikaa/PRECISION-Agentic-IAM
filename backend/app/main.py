@@ -95,8 +95,23 @@ async def lifespan(app: FastAPI):
 
     keystore = get_keystore()
     log.info("keystore_ready", backend=keystore.backend_name, directory=settings.keystore_dir)
-    if settings.keystore_master_key == DEV_MASTER_KEY and settings.is_production:
-        raise RuntimeError("Refusing to start in production with the development master key")
+    if settings.keystore_master_key == DEV_MASTER_KEY:
+        if settings.is_production:
+            raise RuntimeError(
+                "Refusing to start in production with the development master key"
+            )
+        # LOUD IN DEVELOPMENT TOO. The development key is published in this
+        # repository, so every keystore encrypted under it is readable by
+        # anyone who has the repository. That is fine for synthetic demo
+        # material and catastrophic for anything else -- and the difference
+        # is easy to forget once the system has been running for a while.
+        log.warning(
+            "development_master_key_in_use",
+            detail="key material is encrypted under the PUBLISHED development "
+                   "key and is readable by anyone with this repository",
+            remedy="set KEYSTORE_MASTER_KEY to a generated value before "
+                   "storing anything that is not synthetic",
+        )
 
     # Credential issuers must exist before any credential can be verified: the
     # verifier resolves the issuer's public key from this registry. Idempotent.

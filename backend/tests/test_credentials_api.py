@@ -38,8 +38,8 @@ async def credential(client, agent, issuers, admin_post):
 
 
 class TestIssuerEndpoints:
-    async def test_issuers_are_listed_without_private_keys(self, client, issuers):
-        body = (await client.get("/api/v1/credentials/issuers")).json()
+    async def test_issuers_are_listed_without_private_keys(self, cp_get, client, issuers):
+        body = (await cp_get("/api/v1/credentials/issuers")).json()
         assert {i["did"] for i in body} == {BANK, "did:poc:organization:compliance-authority"}
         import json
         assert "private" not in json.dumps(body).lower()
@@ -89,9 +89,9 @@ class TestIssueAndVerify:
 
 
 class TestStatusAndRevocation:
-    async def test_status_endpoint(self, client, credential):
+    async def test_status_endpoint(self, cp_get, client, credential):
         cid = credential["credential_id"]
-        status = (await client.get(f"/api/v1/credentials/{cid}/status")).json()
+        status = (await cp_get(f"/api/v1/credentials/{cid}/status")).json()
         assert status["status"] == "ACTIVE"
         assert status["seconds_remaining"] > 0
 
@@ -114,20 +114,20 @@ class TestStatusAndRevocation:
 
 
 class TestRegistryEndpoints:
-    async def test_list_and_fetch(self, client, credential, agent):
-        listing = (await client.get(f"/api/v1/credentials?subject={agent['did']}")).json()
+    async def test_list_and_fetch(self, cp_get, client, credential, agent):
+        listing = (await cp_get(f"/api/v1/credentials?subject={agent['did']}")).json()
         assert [c["credential_id"] for c in listing] == [credential["credential_id"]]
 
         fetched = (
-            await client.get(f"/api/v1/credentials/{credential['credential_id']}")
+            await cp_get(f"/api/v1/credentials/{credential['credential_id']}")
         ).json()
         assert fetched["credential"]["proof"]["proofValue"] == (
             credential["credential"]["proof"]["proofValue"]
         )
 
-    async def test_agent_detail_exposes_the_credential_inventory(self, client, credential,
+    async def test_agent_detail_exposes_the_credential_inventory(self, cp_get, client, credential,
                                                                  agent):
-        detail = (await client.get(f"/api/v1/agents/{agent['id']}")).json()
+        detail = (await cp_get(f"/api/v1/agents/{agent['id']}")).json()
         inventory = detail["credentials"]
         assert len(inventory) == 1
         assert inventory[0]["credential_type"] == "AgentCapabilityCredential"
@@ -135,19 +135,19 @@ class TestRegistryEndpoints:
         import json
         assert "private" not in json.dumps(detail).lower()
 
-    async def test_agent_credentials_endpoint_can_include_documents(self, client, credential,
+    async def test_agent_credentials_endpoint_can_include_documents(self, cp_get, client, credential,
                                                                     agent):
         entries = (
-            await client.get(f"/api/v1/agents/did/{agent['did']}/credentials",
+            await cp_get(f"/api/v1/agents/did/{agent['did']}/credentials",
                              params={"include_document": "true"})
         ).json()
         assert entries[0]["credential"]["id"] == credential["credential_id"]
 
-    async def test_verification_history_is_queryable(self, client, credential):
+    async def test_verification_history_is_queryable(self, cp_get, client, credential):
         cid = credential["credential_id"]
         await client.post("/api/v1/credentials/verify",
                           json={"credential": credential["credential"]})
-        history = (await client.get(f"/api/v1/credentials/{cid}/verifications")).json()
+        history = (await cp_get(f"/api/v1/credentials/{cid}/verifications")).json()
         assert history[0]["valid"] is True
         assert history[0]["checks"]["signature"] is True
 
@@ -167,8 +167,17 @@ class TestPresentationEndpoints:
         assert report["credentials"][0]["valid"] is True
 
     async def test_challenge_endpoint_is_honest_about_replay(self, client):
+        """THE HONEST ANSWER CHANGED IN PHASE 10.
+
+        This test used to assert `False`, and it was right to: challenges
+        were unpredictable but unrecorded, so a captured presentation
+        replayed cleanly. Phase 10 records them at issue, binds them to a
+        verifier, expires them and spends them exactly once -- so the field
+        now reports True, and it is still honest.
+        """
         body = (await client.get("/api/v1/credentials/challenge")).json()
-        assert body["single_use_enforced"] is False
+        assert body["single_use_enforced"] is True
+        assert body["expires_at"]
 
     async def test_expected_domain_is_enforced_over_http(self, client, credential, agent, admin_post):
         """S-2 wiring: the route must actually pass the audience to the verifier."""
@@ -195,7 +204,7 @@ class TestPresentationEndpoints:
 
 
 class TestAuditIntegration:
-    async def test_credential_events_reach_the_audit_trail(self, client, credential, agent, admin_post):
+    async def test_credential_events_reach_the_audit_trail(self, cp_get, client, credential, agent, admin_post):
         cid = credential["credential_id"]
         await client.post("/api/v1/credentials/verify",
                           json={"credential": credential["credential"]})
@@ -204,18 +213,18 @@ class TestAuditIntegration:
         await client.post("/api/v1/credentials/verify", json={"credential": forged})
         await admin_post(f"/api/v1/credentials/{cid}/revoke", {"reason": "DEMO"})
 
-        events = (await client.get(f"/api/v1/audit?agent_did={agent['did']}&limit=100")).json()
+        events = (await cp_get(f"/api/v1/audit?agent_did={agent['did']}&limit=100")).json()
         recorded = {e["event_type"] for e in events}
         assert {
             "CREDENTIAL_ISSUED", "CREDENTIAL_STORED", "CREDENTIAL_VERIFICATION_STARTED",
             "CREDENTIAL_VERIFIED", "CREDENTIAL_SIGNATURE_INVALID", "CREDENTIAL_REVOKED",
         } <= recorded
 
-    async def test_failed_verification_records_the_failing_check(self, client, credential):
+    async def test_failed_verification_records_the_failing_check(self, cp_get, client, credential):
         forged = copy.deepcopy(credential["credential"])
         forged["credentialSubject"]["capability"] = "payroll_access"
         await client.post("/api/v1/credentials/verify", json={"credential": forged})
 
-        events = (await client.get("/api/v1/audit?event_type=CREDENTIAL_SIGNATURE_INVALID")).json()
+        events = (await cp_get("/api/v1/audit?event_type=CREDENTIAL_SIGNATURE_INVALID")).json()
         assert events[0]["decision"] == "INVALID"
         assert events[0]["metadata"]["failed_check"] == "signature"

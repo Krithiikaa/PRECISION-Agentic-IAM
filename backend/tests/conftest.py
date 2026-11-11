@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import uuid
 
 # Environment must be set before app.core.config caches its Settings.
@@ -20,6 +21,19 @@ import uuid
 DEFAULT_TEST_DB = "postgresql+psycopg://iam:iam@localhost:5433/agentic_iam_test"
 os.environ["DATABASE_URL"] = os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DB)
 os.environ["ENV"] = "test"
+# Phase 10. Rate limiting OFF for the suite as a whole, and deliberately.
+#
+# The suite drives thousands of requests at machine speed through one client
+# -- which is precisely the shape the limiter exists to refuse. Leaving it on
+# would make unrelated tests fail with 429 at a point that depends on
+# ordering, which is the worst kind of flake: it looks like the feature under
+# test broke.
+#
+# The limiter is NOT untested as a result. `test_rate_limiting.py` enables it
+# explicitly and drives it directly, and `Settings` refuses to start with it
+# disabled when ENV=production -- so this convenience cannot reach a
+# deployment.
+os.environ["RATELIMIT_ENABLED"] = "false"
 os.environ["KEYSTORE_DIR"] = tempfile.mkdtemp(prefix="iam-test-keystore-")
 
 # Belt and braces: a destructive suite must never point at a database whose
@@ -1080,3 +1094,287 @@ def backdate_key(session):
         return key
 
     return age
+
+
+# --- Phase 8: MCP security --------------------------------------------------
+@pytest.fixture(scope="session")
+def mcp_signing_key():
+    """An RSA keypair standing in for Keycloak's realm signing key.
+
+    WHY A REAL KEY AND NOT A STUBBED VALIDATOR. Only the JWKS FETCH is
+    replaced in these tests (there is no Keycloak in the unit suite). Every
+    other check in `MCPTokenValidator.validate` runs for real against a
+    genuinely signed token: the signature, the algorithm allow-list, the
+    issuer, the audience, the expiry and the `azp` -> DID mapping. A test
+    that stubbed `validate()` itself would assert nothing about the control
+    it claims to cover.
+    """
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def mcp_token(mcp_signing_key):
+    """Mint an access token of the shape Keycloak issues for an agent.
+
+    `azp` carries the agent DID and `sub` carries a service-account UUID,
+    exactly as the real token does -- so a test can prove the server binds
+    on `azp` by giving the two different values.
+    """
+    import uuid as _uuid
+
+    import jwt as _jwt
+
+    def make(agent_did: str | None = None, **overrides):
+        settings = get_settings()
+        now = int(time.time())
+        claims = {
+            "iss": settings.keycloak_issuer,
+            "aud": settings.mcp_audience,
+            "azp": agent_did,
+            "sub": str(_uuid.uuid4()),
+            "jti": _uuid.uuid4().hex,
+            "iat": now,
+            "exp": now + 900,
+            "typ": "Bearer",
+            "scope": "mcp:invoke",
+        }
+        claims.update(overrides)
+        claims = {k: v for k, v in claims.items() if v is not None}
+        algorithm = overrides.pop("_alg", "RS256")
+        return _jwt.encode(claims, mcp_signing_key, algorithm=algorithm)
+
+    return make
+
+
+@pytest.fixture
+def mcp_app(session, keystore, mcp_signing_key, monkeypatch):
+    """The real FastAPI app with ONLY the JWKS lookup replaced.
+
+    `_signing_key` is the single seam: it is the function that would reach
+    out to Keycloak. Everything above and below it is the production code
+    path, including the route, the transport checks, the session binding,
+    the dispatcher, the AEM, the PDP and OPA.
+    """
+    from app.api.deps import get_keystore
+    from app.api.routes import mcp as mcp_routes
+    from app.db.database import get_session
+    from app.main import create_app
+
+    monkeypatch.setattr(
+        mcp_routes._validator,
+        "_signing_key",
+        lambda token: mcp_signing_key.public_key(),
+    )
+
+    app = create_app()
+    app.dependency_overrides[get_session] = lambda: session
+    app.dependency_overrides[get_keystore] = lambda: keystore
+    yield app
+    app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def mcp_client(mcp_app):
+    transport = ASGITransport(app=mcp_app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as c:
+        yield c
+
+
+@pytest.fixture
+def mcp_headers():
+    """The headers a conformant MCP client sends.
+
+    Spelled out in one place so a test that omits one is omitting it on
+    purpose, and so the Accept requirement is visible rather than buried.
+    """
+    def make(token: str | None = None, session_id: str | None = None, **extra):
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        if session_id:
+            headers["Mcp-Session-Id"] = session_id
+        headers.update(extra)
+        return headers
+
+    return make
+
+
+@pytest_asyncio.fixture
+async def mcp_policy_loaded(opa_ready):
+    """Push every ACTIVE policy data document, including the MCP one.
+
+    Policy fails CLOSED without it: `mcp/invocation.rego` denies with
+    MCP_POLICY_UNCONFIGURED when `data.agentic_iam.config.mcp` is absent, so
+    a test running against an engine missing it would see that reason
+    everywhere and look like a policy bug.
+    """
+    from app.authorization.opa import OPAClient
+    from app.authorization.pap import PolicyAdministrationPoint
+
+    pap = PolicyAdministrationPoint(None, get_settings())
+    client = OPAClient(get_settings())
+    try:
+        for definition in pap.read_data_definitions():
+            if definition.status == "ACTIVE":
+                await client.put_data(definition.path, definition.document)
+    finally:
+        await client.aclose()
+    return True
+
+
+@pytest_asyncio.fixture
+async def mcp_initialized(mcp_client, mcp_headers, mcp_token, risk_agent):
+    """An initialized MCP session for `risk_agent`, with its session id.
+
+    Returns `(session_id, token)` so a test can reuse the same token or
+    deliberately present a different one.
+    """
+    token = mcp_token(risk_agent.did)
+    response = await mcp_client.post(
+        "/mcp",
+        headers=mcp_headers(token),
+        json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "1.0"},
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    session_id = response.headers["Mcp-Session-Id"]
+    await mcp_client.post(
+        "/mcp",
+        headers=mcp_headers(token, session_id),
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+    )
+    return session_id, token
+
+
+@pytest.fixture
+def mcp_call(mcp_client, mcp_headers):
+    """Send one tools/call and return the HTTP response."""
+    import uuid as _uuid
+
+    async def send(
+        session_id: str, token: str, *, tool: str, arguments: dict,
+        purpose: str | None = "loan_assessment", request_id=None, **extra,
+    ):
+        params = {"name": tool, "arguments": arguments}
+        if purpose is not None:
+            params["_meta"] = {
+                get_settings().mcp_purpose_meta_key: purpose
+            }
+        params.update(extra)
+        return await mcp_client.post(
+            "/mcp",
+            headers=mcp_headers(token, session_id),
+            json={
+                "jsonrpc": "2.0",
+                "id": request_id or _uuid.uuid4().hex,
+                "method": "tools/call",
+                "params": params,
+            },
+        )
+
+    return send
+
+
+# --- Phase 10: reading through the control-plane guard ----------------------
+@pytest_asyncio.fixture
+async def cp_get(client, sign_control_plane, control_plane, opa_ready):
+    """GET through the control-plane guard as a given principal.
+
+    PHASE 10 MADE THE SENSITIVE READ SURFACE AUTHENTICATED. Until then every
+    GET answered anybody, so tests simply called `client.get(...)`. They now
+    have to prove who is asking, exactly as a real operator does.
+
+    `identity-authority` is the default principal because it holds
+    `identity_admin`, which the read matrix maps to the identity, credential,
+    audit, approval and grant domains -- the ones most tests need. Policy and
+    loan reads need their own administrators, and a test that wants one says
+    so, which is the point: a test that can read everything by default would
+    not notice the day the matrix stopped separating them.
+    """
+    from app.controlplane.client import canonical_body
+
+    async def get(path, principal_did="did:poc:administrator:identity-authority",
+                  params=None):
+        # The proof binds METHOD and PATH, not the query string (the server
+        # signs `request.url.path`). Query parameters are therefore passed
+        # separately and are NOT covered by the signature -- which is safe
+        # here because the read operations are scoped to a DOMAIN, not to a
+        # row: `audit_read` grants the trail, and filtering within it cannot
+        # reach anything the role did not already have.
+        # THE SIGNED PATH MUST NOT CARRY THE QUERY STRING. The server signs
+        # `request.url.path`, which excludes it, so signing "/x?limit=200"
+        # produces a proof the server cannot reproduce -- a 401 that looks
+        # exactly like a missing role and sends the reader hunting through
+        # the policy set. Split it off and send it as a query instead.
+        bare, _, query = path.partition("?")
+        headers = sign_control_plane(
+            principal_did, method="GET", path=bare, body=canonical_body(None),
+        )
+        target = f"{bare}?{query}" if query else bare
+        return await client.get(target, headers=headers, params=params)
+
+    return get
+
+
+@pytest.fixture
+def policy_admin_get(cp_get):
+    """Read as the POLICY administrator -- the only role holding
+    `policy_read`."""
+    async def get(path, params=None):
+        return await cp_get(path, "did:poc:administrator:platform-security",
+                            params=params)
+
+    return get
+
+
+@pytest.fixture
+def loan_admin_get(cp_get):
+    """Read as the LOAN administrator -- the only machine role holding
+    `loan_read`. Deliberately NOT identity-authority: an administrator of
+    agents has no business opening a customer's file, and the read matrix
+    enforces that."""
+    async def get(path, params=None):
+        return await cp_get(path, "did:poc:administrator:core-banking",
+                            params=params)
+
+    return get
+
+
+# --- Phase 10: real, issued presentation challenges -------------------------
+@pytest_asyncio.fixture
+async def fresh_challenge(session):
+    """A challenge this verifier ACTUALLY ISSUED.
+
+    PHASE 10 MADE CHALLENGES SINGLE-USE AND RECORDED. Before that, a test
+    could invent `"nonce-1"` and the verifier would accept it, because
+    nothing was tracked -- which was precisely the replay gap. A fabricated
+    value is now refused with `CHALLENGE_UNKNOWN`, so tests obtain one the
+    way a real holder does.
+    """
+    from app.credentials.challenge import ChallengeService
+
+    record = await ChallengeService(session, get_settings()).issue()
+    return record.challenge
+
+
+@pytest_asyncio.fixture
+async def challenge_for():
+    """Issue a challenge bound to a specific verifier domain."""
+    from app.credentials.challenge import ChallengeService
+
+    async def make(session, domain=None):
+        record = await ChallengeService(session, get_settings()).issue(domain=domain)
+        return record.challenge
+
+    return make

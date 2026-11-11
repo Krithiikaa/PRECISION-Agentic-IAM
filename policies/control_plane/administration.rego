@@ -97,6 +97,31 @@ required_role := {
 	#
 	# The cost is that automation and the gate must sign as the receiving
 	# AGENT rather than as an administrator. That is the correct cost.
+
+	# --- Phase 10: the sensitive READ surface -------------------------
+	# Each read domain sits with the administrator who already governs it,
+	# so reading never arrives as a side effect of holding an unrelated
+	# role. One role per operation, exactly like every entry above.
+	#
+	# `identity_admin` already creates agents, issues and revokes
+	# credentials and ingests audit, so reading those same domains adds no
+	# authority it did not already have.
+	"identity_read": "identity_admin",
+	"credential_read": "identity_admin",
+	"audit_read": "identity_admin",
+	"approval_read": "identity_admin",
+	"grant_read": "identity_admin",
+
+	# Policy with the policy administrator, NOT with identity. Knowing
+	# which rules are live is the first half of evading them, and the
+	# administrator who activates policy is the one who already knows.
+	"policy_read": "policy_admin",
+
+	# Loan records with `loan_admin`, the role that already owns the
+	# amount. NOT `identity_admin`: an administrator of agents has no
+	# business opening a customer's file, and the fact that it can suspend
+	# the agent processing that file does not change the answer.
+	"loan_read": "loan_admin",
 }
 
 # Operations that belong to HUMANS. An administrator key is a machine

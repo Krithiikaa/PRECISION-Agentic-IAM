@@ -58,7 +58,8 @@ DEMO_AGENTS = [
 
 def call(method: str, path: str, body=None, principal: str | None = None):
     if principal is not None:
-        data, headers = cp_sign.signed(principal, method, path, body)
+        data, headers = cp_sign.signed(
+            principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -101,7 +102,12 @@ def provision(slug: str) -> bool:
         handle = keystore.generate_key(kid)
         key_state = "generated"
 
-    status, existing = call("GET", f"/api/v1/agents/did/{did}")
+    # PHASE 10. Reading the registry is now `identity_read`, so this
+    # existence check signs. Unsigned it returned 401, the script concluded
+    # the agent did not exist, and the create below failed with 409 for
+    # every single agent -- so run_local.sh started none of them.
+    status, existing = call("GET", f"/api/v1/agents/did/{did}",
+                            principal=cp_sign.IDENTITY_ADMIN)
     if status == 200:
         published = (existing.get("active_key") or {}).get("public_key_multibase")
         if published != handle.public_key_multibase:

@@ -49,32 +49,32 @@ class TestAgentEndpoints:
     async def test_invalid_slug_is_rejected_by_validation(self, client, admin_post):
         assert (await admin_post("/api/v1/agents", _payload("Risk_001"))).status_code == 422
 
-    async def test_list_and_filter_by_capability(self, client, admin_post):
+    async def test_list_and_filter_by_capability(self, cp_get, client, admin_post):
         await admin_post("/api/v1/agents", _payload())
         await admin_post(
             "/api/v1/agents",
             _payload("fraud-001", name="Fraud Detection Agent", agent_type="FRAUD",
                      capabilities=["fraud_detection"]),
         )
-        assert len((await client.get("/api/v1/agents")).json()) == 2
-        filtered = (await client.get("/api/v1/agents?capability=fraud_detection")).json()
+        assert len((await cp_get("/api/v1/agents")).json()) == 2
+        filtered = (await cp_get("/api/v1/agents?capability=fraud_detection")).json()
         assert [a["did"] for a in filtered] == ["did:poc:agent:fraud-001"]
 
-    async def test_resolve_by_did_and_fetch_did_document(self, client, admin_post):
+    async def test_resolve_by_did_and_fetch_did_document(self, cp_get, client, admin_post):
         created = (await admin_post("/api/v1/agents", _payload())).json()
         did = created["did"]
 
-        assert (await client.get(f"/api/v1/agents/did/{did}")).json()["id"] == created["id"]
+        assert (await cp_get(f"/api/v1/agents/did/{did}")).json()["id"] == created["id"]
 
-        document = (await client.get(f"/api/v1/agents/did/{did}/did-document")).json()
+        document = (await cp_get(f"/api/v1/agents/did/{did}/did-document")).json()
         assert document["id"] == did
         assert document["verificationMethod"][0]["publicKeyMultibase"] == (
             created["active_key"]["public_key_multibase"]
         )
         assert document["service"][0]["serviceEndpoint"] == "http://localhost:9003"
 
-    async def test_unknown_did_is_404(self, client):
-        response = await client.get("/api/v1/agents/did/did:poc:agent:ghost-001")
+    async def test_unknown_did_is_404(self, cp_get, client):
+        response = await cp_get("/api/v1/agents/did/did:poc:agent:ghost-001")
         assert response.status_code == 404
         assert response.json()["error"] == "NOT_FOUND"
 
@@ -152,20 +152,20 @@ class TestLifecycleEndpoints:
 
 
 class TestAuditTrail:
-    async def test_lifecycle_events_are_recorded(self, client, cp_post, control_plane,
+    async def test_lifecycle_events_are_recorded(self, cp_get, client, cp_post, control_plane,
                                                  identity_admin_did, opa_ready, admin_post):
         created = (await admin_post("/api/v1/agents", _payload())).json()
         await cp_post(f"/api/v1/agents/{created['id']}/sign", identity_admin_did,
                       {"message": MESSAGE})
 
-        events = (await client.get(f"/api/v1/audit?agent_did={created['did']}")).json()
+        events = (await cp_get(f"/api/v1/audit?agent_did={created['did']}")).json()
         recorded = {e["event_type"] for e in events}
         assert {
             "AGENT_CREATED", "DID_ASSIGNED", "KEY_GENERATED",
             "DID_DOCUMENT_PUBLISHED", "AGENT_ACTIVATED", "SIGNATURE_CREATED",
         } <= recorded
 
-    async def test_invalid_signature_is_audited_as_such(self, client, cp_post,
+    async def test_invalid_signature_is_audited_as_such(self, cp_get, client, cp_post,
                                                         control_plane,
                                                         identity_admin_did, opa_ready, admin_post):
         created = (await admin_post("/api/v1/agents", _payload())).json()
@@ -177,11 +177,11 @@ class TestAuditTrail:
             "/api/v1/identity/verify",
             json={"did": created["did"], "message": TAMPERED, "signature": signed["signature"]},
         )
-        events = (await client.get("/api/v1/audit?event_type=SIGNATURE_INVALID")).json()
+        events = (await cp_get("/api/v1/audit?event_type=SIGNATURE_INVALID")).json()
         assert len(events) == 1
         assert events[0]["decision"] == "INVALID"
 
-    async def test_agent_process_events_are_ingested(self, client, agent_post,
+    async def test_agent_process_events_are_ingested(self, cp_get, client, agent_post,
                                                      admin_post, opa_ready):
         """An agent writes its OWN activity, and the event is ATTRIBUTABLE.
 
@@ -198,12 +198,12 @@ class TestAuditTrail:
              "task_id": "t-1"},
         )
         assert response.status_code == 202
-        events = (await client.get("/api/v1/audit?event_type=AGENT_TASK_COMPLETED")).json()
+        events = (await cp_get("/api/v1/audit?event_type=AGENT_TASK_COMPLETED")).json()
         assert events[0]["metadata"]["task_id"] == "t-1"
         assert events[0]["metadata"]["ingested_by"] == created["did"]
         assert events[0]["metadata"]["ingested_by_type"] == "agent"
 
-    async def test_unauthenticated_audit_ingest_is_refused(self, client, opa_ready):
+    async def test_unauthenticated_audit_ingest_is_refused(self, cp_get, client, opa_ready):
         """Audit forgery, refused.
 
         An open ingest endpoint lets an attacker write a record of events that
@@ -216,7 +216,7 @@ class TestAuditTrail:
                   "agent_did": "did:poc:agent:risk-001", "task_id": "forged"},
         )
         assert response.status_code == 401
-        assert (await client.get(
+        assert (await cp_get(
             "/api/v1/audit?event_type=AGENT_TASK_COMPLETED")).json() == []
 
     async def test_an_agent_cannot_write_history_for_another_agent(

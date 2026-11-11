@@ -393,13 +393,13 @@ class TestS7Closure:
 
     # 22 -- anonymous credential revocation -> rejected
     async def test_22_anonymous_credential_revocation_is_refused(
-        self, client, loan_agent_credential
+        self, cp_get, client, loan_agent_credential
     ):
         credential_id = loan_agent_credential["credential_id"]
         response = await client.post(
             f"/api/v1/credentials/{credential_id}/revoke", json={"reason": "COMPROMISED"})
         assert response.status_code == 401
-        status = (await client.get(
+        status = (await cp_get(
             f"/api/v1/credentials/{credential_id}/status")).json()
         assert status["status"] == "ACTIVE"
 
@@ -424,20 +424,20 @@ class TestS7Closure:
 
     # 24 -- unauthorized credential revocation -> rejected
     async def test_24_the_wrong_human_cannot_revoke(
-        self, human_post, client, loan_agent_credential, loan_officer_token
+        self, cp_get, human_post, client, loan_agent_credential, loan_officer_token
     ):
         credential_id = loan_agent_credential["credential_id"]
         response = await human_post(
             f"/api/v1/credentials/{credential_id}/revoke", loan_officer_token,
             {"reason": "COMPROMISED"})
         assert response.status_code == 403
-        status = (await client.get(
+        status = (await cp_get(
             f"/api/v1/credentials/{credential_id}/status")).json()
         assert status["status"] == "ACTIVE"
 
     # 25 -- unauthorized agent termination -> rejected
     async def test_25_unauthorized_agent_termination_is_refused(
-        self, client, human_post, loan_agent, loan_officer_token
+        self, cp_get, client, human_post, loan_agent, loan_officer_token
     ):
         for kwargs in ({}, {"token": loan_officer_token}):
             if kwargs:
@@ -451,16 +451,16 @@ class TestS7Closure:
                     json={"status": "TERMINATED", "reason": "x"})
                 assert response.status_code == 401
         # Still alive.
-        assert (await client.get(
+        assert (await cp_get(
             f"/api/v1/agents/{loan_agent['id']}")).json()["status"] == "ACTIVE"
 
-    async def test_anonymous_agent_creation_is_refused(self, client, opa_ready,
+    async def test_anonymous_agent_creation_is_refused(self, cp_get, client, opa_ready,
                                                        control_plane):
         response = await client.post("/api/v1/agents", json={
             "slug": "rogue-001", "name": "Rogue", "agent_type": "RISK",
             "capabilities": ["credit_analysis"], "endpoint": "http://localhost:9099"})
         assert response.status_code == 401
-        assert (await client.get("/api/v1/agents")).json() == []
+        assert (await cp_get("/api/v1/agents")).json() == []
 
     async def test_the_authorized_administrator_may_do_all_of_it(
         self, human_post, client, iam_admin_token, issuers, opa_ready, control_plane
@@ -625,12 +625,12 @@ class TestNoBlindApproval:
             headers={"Authorization": f"Bearer {loan_officer_token}"})).json()
         assert "credit_score" not in str(body)
 
-    async def test_viewing_is_recorded(self, client, escalate, loan_officer_token):
+    async def test_viewing_is_recorded(self, cp_get, client, escalate, loan_officer_token):
         """Auditable evidence that the decision was INFORMED."""
         _, approval_id, _ = await escalate()
         await client.get(f"/api/v1/hitl/approvals/{approval_id}",
                          headers={"Authorization": f"Bearer {loan_officer_token}"})
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         viewed = [e for e in events if e["event_type"] == "APPROVAL_VIEWED"]
         assert viewed
         assert viewed[0]["metadata"]["approval_id"] == approval_id
@@ -641,7 +641,7 @@ class TestAuditTrail:
     """§30, §31. The whole lifecycle, correlated."""
 
     async def test_the_full_lifecycle_is_recorded(
-        self, client, cp_post, human_post, escalate, loan_officer_token, loan_agent
+        self, cp_get, client, cp_post, human_post, escalate, loan_officer_token, loan_agent
     ):
         _, approval_id, request_id = await escalate()
         await client.get(f"/api/v1/hitl/approvals/{approval_id}",
@@ -652,7 +652,7 @@ class TestAuditTrail:
                       "did:poc:administrator:enforcement-gateway",
                       enforce_body(loan_agent["did"], request_id=request_id))
 
-        events = (await client.get("/api/v1/audit?limit=400")).json()
+        events = (await cp_get("/api/v1/audit?limit=400")).json()
         types = {e["event_type"] for e in events}
         for expected in ("HUMAN_AUTHENTICATED", "APPROVAL_REQUESTED",
                          "APPROVAL_VIEWED", "APPROVAL_APPROVED",
@@ -661,7 +661,7 @@ class TestAuditTrail:
             assert expected in types, expected
 
     async def test_the_flow_is_correlated_by_request_id(
-        self, client, cp_post, human_post, escalate, loan_officer_token, loan_agent
+        self, cp_get, client, cp_post, human_post, escalate, loan_officer_token, loan_agent
     ):
         """§31. One loan action, traceable end to end."""
         _, approval_id, request_id = await escalate()
@@ -671,7 +671,7 @@ class TestAuditTrail:
                       "did:poc:administrator:enforcement-gateway",
                       enforce_body(loan_agent["did"], request_id=request_id))
 
-        events = (await client.get("/api/v1/audit?limit=400")).json()
+        events = (await cp_get("/api/v1/audit?limit=400")).json()
         correlated = [e for e in events if e.get("request_id") == request_id]
         types = {e["event_type"] for e in correlated}
         assert {"AEM_INTERCEPT", "AUTHORIZATION_REQUESTED", "APPROVAL_REQUESTED",
@@ -679,25 +679,25 @@ class TestAuditTrail:
                 "APPROVAL_CONSUMED", "AEM_ALLOWED"} <= types
 
     async def test_the_approver_is_named_in_the_trail(
-        self, client, human_post, escalate, loan_officer_token
+        self, cp_get, client, human_post, escalate, loan_officer_token
     ):
         _, approval_id, _ = await escalate()
         await human_post(f"/api/v1/hitl/approvals/{approval_id}/decide",
                          loan_officer_token, {"decision": "APPROVED"})
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         approved = [e for e in events if e["event_type"] == "APPROVAL_APPROVED"][0]
         assert approved["metadata"]["approver_username"] == "loan.officer"
         assert approved["metadata"]["approver_roles"] == ["LOAN_OFFICER"]
         assert approved["metadata"]["signed_by"] == "did:poc:service:approval-authority"
 
     async def test_no_token_or_secret_is_ever_logged(
-        self, client, human_post, escalate, loan_officer_token
+        self, cp_get, client, human_post, escalate, loan_officer_token
     ):
         """§30. Not the access token, not a refresh token, not a password."""
         _, approval_id, _ = await escalate()
         await human_post(f"/api/v1/hitl/approvals/{approval_id}/decide",
                          loan_officer_token, {"decision": "APPROVED"})
-        trail = str((await client.get("/api/v1/audit?limit=400")).json())
+        trail = str((await cp_get("/api/v1/audit?limit=400")).json())
         assert loan_officer_token not in trail
         for forbidden in ("password", "refresh_token", "client_secret"):
             assert forbidden not in trail.lower()
@@ -781,14 +781,14 @@ class TestApprovalIsNotStandingPermission:
         assert loan_application_status(OTHER_LOAN) == "AWAITING_DECISION"
 
     async def test_an_approval_never_becomes_a_credential(
-        self, client, human_post, escalate, loan_officer_token, loan_agent
+        self, cp_get, client, human_post, escalate, loan_officer_token, loan_agent
     ):
         """Approving an action must not grant the agent a capability."""
         _, approval_id, _ = await escalate()
-        before = (await client.get(
+        before = (await cp_get(
             f"/api/v1/credentials?subject={loan_agent['did']}")).json()
         await human_post(f"/api/v1/hitl/approvals/{approval_id}/decide",
                          loan_officer_token, {"decision": "APPROVED"})
-        after = (await client.get(
+        after = (await cp_get(
             f"/api/v1/credentials?subject={loan_agent['did']}")).json()
         assert len(after) == len(before)

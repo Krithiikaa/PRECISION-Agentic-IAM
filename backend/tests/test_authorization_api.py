@@ -145,9 +145,9 @@ class TestEnforceEndpoint:
         assert response.status_code == 404
 
     async def test_protected_tools_are_listed_with_their_resource_and_action(
-        self, client
+        self, cp_get, client
     ):
-        tools = (await client.get("/api/v1/enforce/tools")).json()
+        tools = (await cp_get("/api/v1/enforce/tools")).json()
         names = {t["name"] for t in tools}
         # An INVENTORY, asserted exactly so a tool cannot appear behind the
         # boundary without somebody noticing. Phase 5 added the loan
@@ -171,13 +171,13 @@ class TestEnforceEndpoint:
 
 class TestPolicyAdministration:
     async def test_policies_are_listed_with_lifecycle_metadata(
-        self, client, session, opa_ready
+        self, policy_admin_get, cp_get, client, session, opa_ready
     ):
         from app.authorization.pap import PolicyAdministrationPoint
         from app.core.config import get_settings
 
         await PolicyAdministrationPoint(session, get_settings()).load_all()
-        report = (await client.get("/api/v1/policies")).json()
+        report = (await policy_admin_get("/api/v1/policies")).json()
         assert report["engine"]["reachable"] is True
         ids = {p["policy_id"] for p in report["policies"]}
         assert {"loan-credit-read", "resource-scope", "credential-state",
@@ -233,26 +233,26 @@ class TestAuthorizationHealth:
 
 
 class TestDecisionLog:
-    async def test_decisions_are_queryable(self, client, cp_post, credential, agent,
+    async def test_decisions_are_queryable(self, cp_get, client, cp_post, credential, agent,
                                            opa_ready):
         await cp_post("/api/v1/authorize", agent["did"], authorize_body(agent["did"]))
         await cp_post("/api/v1/authorize", agent["did"], authorize_body(
             agent["did"], resource={"type": "payroll_records", "id": "customer-007"},
         ))
-        rows = (await client.get("/api/v1/authorize/decisions",
+        rows = (await cp_get("/api/v1/authorize/decisions",
                                  params={"subject": agent["did"]})).json()
         assert len(rows) == 2
         assert {r["decision"] for r in rows} == {"ALLOW", "DENY"}
         for row in rows:
             assert row["request_id"] and row["purpose"] and row["reason"]
 
-    async def test_decisions_can_be_filtered(self, client, cp_post, credential, agent,
+    async def test_decisions_can_be_filtered(self, cp_get, client, cp_post, credential, agent,
                                              opa_ready):
         await cp_post("/api/v1/authorize", agent["did"], authorize_body(agent["did"]))
         await cp_post("/api/v1/authorize", agent["did"], authorize_body(
             agent["did"], resource={"type": "payroll_records"},
         ))
-        denies = (await client.get("/api/v1/authorize/decisions",
+        denies = (await cp_get("/api/v1/authorize/decisions",
                                    params={"decision": "DENY"})).json()
         assert denies and all(r["decision"] == "DENY" for r in denies)
 

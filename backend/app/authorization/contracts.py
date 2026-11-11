@@ -194,6 +194,61 @@ class Reason:
     # thing for the console and the queue to understand.
     A2A_PAYMENT_REQUIRES_HUMAN = "A2A_PAYMENT_REQUIRES_HUMAN"
 
+    # --- Phase 8: MCP security --------------------------------------------
+    # TRANSPORT refusals. These are AUTHENTICATION and protocol failures
+    # surfaced as authorization reasons: the MCP transport refuses them
+    # before the PDP is asked, and `mcp/invocation.rego` asserts them
+    # independently so the refusal is reviewable in Rego rather than
+    # emergent from Python control flow. Same arrangement as Phase 7.
+    MCP_TOKEN_MISSING = "MCP_TOKEN_MISSING"
+    MCP_TOKEN_MALFORMED = "MCP_TOKEN_MALFORMED"
+    MCP_TOKEN_SIGNATURE_INVALID = "MCP_TOKEN_SIGNATURE_INVALID"
+    MCP_TOKEN_EXPIRED = "MCP_TOKEN_EXPIRED"
+    MCP_TOKEN_ISSUER_MISMATCH = "MCP_TOKEN_ISSUER_MISMATCH"
+    # The cross-service reuse refusal: a token minted for the human console
+    # API, or any other service in the realm, presented at the MCP endpoint.
+    MCP_TOKEN_AUDIENCE_MISMATCH = "MCP_TOKEN_AUDIENCE_MISMATCH"
+    MCP_TOKEN_ALGORITHM_NOT_ALLOWED = "MCP_TOKEN_ALGORITHM_NOT_ALLOWED"
+    MCP_IDENTITY_PROVIDER_UNAVAILABLE = "MCP_IDENTITY_PROVIDER_UNAVAILABLE"
+
+    # SESSION refusals. NOT_OWNED is the one that matters: an agent
+    # presenting a session id issued to a different agent. Its own reason
+    # rather than a generic rejection, because it is an attempt to borrow
+    # an identity and not a client bug.
+    MCP_SESSION_MISSING = "MCP_SESSION_MISSING"
+    MCP_SESSION_UNKNOWN = "MCP_SESSION_UNKNOWN"
+    MCP_SESSION_NOT_OWNED = "MCP_SESSION_NOT_OWNED"
+    MCP_SESSION_NOT_BOUND = "MCP_SESSION_NOT_BOUND"
+    MCP_SESSION_EXPIRED = "MCP_SESSION_EXPIRED"
+    MCP_SESSION_TERMINATED = "MCP_SESSION_TERMINATED"
+    MCP_SESSION_REVOKED = "MCP_SESSION_REVOKED"
+    MCP_SESSION_PROTOCOL_MISMATCH = "MCP_SESSION_PROTOCOL_MISMATCH"
+
+    # REQUEST refusals.
+    MCP_PURPOSE_MISSING = "MCP_PURPOSE_MISSING"
+    MCP_PURPOSE_MALFORMED = "MCP_PURPOSE_MALFORMED"
+    MCP_TOOL_UNKNOWN = "MCP_TOOL_UNKNOWN"
+    MCP_ARGUMENTS_MALFORMED = "MCP_ARGUMENTS_MALFORMED"
+    MCP_ARGUMENTS_UNKNOWN_FIELD = "MCP_ARGUMENTS_UNKNOWN_FIELD"
+    MCP_ARGUMENTS_MISSING_REQUIRED = "MCP_ARGUMENTS_MISSING_REQUIRED"
+    # The values policy authorized and the values executed disagreed.
+    MCP_ARGUMENTS_MISMATCH = "MCP_ARGUMENTS_MISMATCH"
+    MCP_REPLAY_BLOCKED = "MCP_REPLAY_BLOCKED"
+    MCP_REQUEST_ID_REUSE = "MCP_REQUEST_ID_REUSE"
+
+    # POLICY refusals for an invocation that arrived perfectly.
+    MCP_POLICY_UNCONFIGURED = "MCP_POLICY_UNCONFIGURED"
+    MCP_ACTION_NOT_ELIGIBLE = "MCP_ACTION_NOT_ELIGIBLE"
+    MCP_NO_ENFORCEMENT_PATH = "MCP_NO_ENFORCEMENT_PATH"
+    MCP_EXECUTION_FAILED = "MCP_EXECUTION_FAILED"
+
+    # NOTE: there is deliberately NO `MCP_INVOCATION_AUTHORIZED` ALLOW reason
+    # in the policy set. `mcp/invocation.rego` contributes DENY rules only --
+    # an MCP call that survives it is allowed by the action's OWN policy and
+    # carries that policy's reason, so an auditor sees `loan-credit-read`
+    # allowed the read, not that "MCP" did. The channel is visible in the
+    # audit trail, never in the grant.
+
 
 # Reasons that indicate the authorization layer itself could not reach a
 # policy-based verdict. They are denials, and they are recorded distinctly so an

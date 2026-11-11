@@ -100,10 +100,28 @@ class CredentialWallet:
         )
 
     async def refresh(self) -> list[HeldCredential]:
+        # PHASE 10. Reading the credential inventory became an authorized
+        # operation (`credential_read`). The agent signs this read with the
+        # key it already holds -- the same proof it uses for a heartbeat --
+        # so it loads ITS OWN wallet as an authenticated principal rather
+        # than as an anonymous caller.
+        #
+        # The signed path excludes the query string: the server signs
+        # `request.url.path`, so including `?include_document=true` would
+        # produce a proof it cannot reproduce.
+        from app.controlplane.client import canonical_body, control_plane_headers
+
+        path = f"/api/v1/agents/did/{self.holder_did}/credentials"
         try:
+            headers = control_plane_headers(
+                self.signer, principal_did=self.holder_did,
+                kid=self.holder_kid, method="GET", path=path,
+                body=canonical_body(None),
+            )
             response = await self.iam.get(
-                f"/api/v1/agents/did/{self.holder_did}/credentials",
+                path,
                 params={"include_document": "true"},
+                headers=headers,
                 timeout=10.0,
             )
             response.raise_for_status()

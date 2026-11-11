@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.audit.service import AuditService
 from app.core.config import Settings, get_settings
 from app.core.errors import IdentityError, NotFoundError
+from app.credentials.challenge import ChallengeReason, ChallengeService
 from app.credentials.canonical import CanonicalizationError
 from app.credentials.presentation import (
     attach_proof,
@@ -33,8 +34,27 @@ class PresentationReason:
     HOLDER_UNKNOWN = "HOLDER_UNKNOWN"
     HOLDER_PROOF_INVALID = "HOLDER_PROOF_INVALID"
     CHALLENGE_MISMATCH = "CHALLENGE_MISMATCH"
+    # Phase 10. Each names ONE condition, so an operator reading a refusal
+    # learns whether the holder replayed, dawdled, or was handed a challenge
+    # meant for a different verifier.
+    CHALLENGE_REPLAYED = "CHALLENGE_ALREADY_USED"
+    CHALLENGE_EXPIRED = "CHALLENGE_EXPIRED"
+    CHALLENGE_UNKNOWN = "CHALLENGE_UNKNOWN"
+    CHALLENGE_DOMAIN_MISMATCH = "CHALLENGE_DOMAIN_MISMATCH"
+    CHALLENGE_REQUIRED = "CHALLENGE_REQUIRED"
     DOMAIN_MISMATCH = "DOMAIN_MISMATCH"
     CREDENTIAL_INVALID = "CREDENTIAL_INVALID"
+
+
+# Maps the ledger's verdict onto this module's reason vocabulary. A dict
+# rather than a chain of ifs so a new ledger reason that nobody mapped
+# raises a KeyError in a test instead of silently becoming a generic failure.
+_CHALLENGE_REASONS = {
+    ChallengeReason.UNKNOWN: PresentationReason.CHALLENGE_UNKNOWN,
+    ChallengeReason.ALREADY_USED: PresentationReason.CHALLENGE_REPLAYED,
+    ChallengeReason.EXPIRED: PresentationReason.CHALLENGE_EXPIRED,
+    ChallengeReason.DOMAIN_MISMATCH: PresentationReason.CHALLENGE_DOMAIN_MISMATCH,
+}
 
 
 @dataclass
@@ -305,6 +325,19 @@ class PresentationVerifier:
                 return await self._finish(
                     report, PresentationReason.CHALLENGE_MISMATCH, verifier, request_id
                 )
+
+        elif self.settings.challenge_required:
+            # NO CHALLENGE AT ALL, and this verifier requires one. Refused
+            # rather than waved through: "the verifier did not ask" is
+            # exactly the condition a replayed presentation relies on.
+            checks.append(
+                Check("challenge", False,
+                      "this verifier requires a challenge it issued, and the "
+                      "caller supplied none")
+            )
+            return await self._finish(
+                report, PresentationReason.CHALLENGE_REQUIRED, verifier, request_id
+            )
         else:
             checks.append(
                 Check("challenge", True, "no challenge required by this verifier")
@@ -340,6 +373,42 @@ class PresentationVerifier:
                       if presented_domain is not None
                       else "no audience required by this verifier")
             )
+
+        # --- PHASE 10: SPEND THE CHALLENGE ----------------------------------
+        # Equality alone was the gap this closes: a captured presentation
+        # carries the SAME challenge, so it matched and verified cleanly
+        # against any verifier that reused one. Consuming it atomically is
+        # what makes a second presentation fail.
+        #
+        # THE POSITION IS DELIBERATE, and it is LAST of the binding checks:
+        #
+        #   after the holder proof   a presentation whose signature does not
+        #                            verify must not burn a real challenge
+        #   after the domain check   otherwise an attacker could relay a
+        #                            captured presentation to the WRONG
+        #                            verifier purely to spend the victim's
+        #                            challenge -- turning replay protection
+        #                            into a denial-of-service against the
+        #                            legitimate holder
+        #
+        # So a misaddressed presentation is refused as DOMAIN_MISMATCH, with
+        # the challenge still unspent and still usable by its owner.
+        if expected_challenge is not None:
+            outcome = await ChallengeService(self.session, self.settings).spend(
+                expected_challenge,
+                domain=expected_domain,
+                holder=report.holder,
+                presentation_id=document.get("id"),
+            )
+            checks.append(
+                Check("challenge_single_use", outcome.spent,
+                      "challenge consumed; it cannot be presented again"
+                      if outcome.spent else outcome.detail or outcome.reason.value)
+            )
+            if not outcome.spent:
+                return await self._finish(
+                    report, _CHALLENGE_REASONS[outcome.reason], verifier, request_id
+                )
 
         # --- each credential -------------------------------------------------
         # expected_subject is the proven holder: this is what stops an agent

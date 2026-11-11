@@ -65,6 +65,16 @@ self_operations := {
 	"audit_ingest",
 	"jit_request",
 	"a2a_submit",
+
+	# PHASE 10. An agent loading ITS OWN wallet. In `self_operations` and
+	# NOT in `peer_operations`, deliberately: this one IS about yourself,
+	# so PRINCIPAL_IS_NOT_THE_SUBJECT applies and an agent reading
+	# `/agents/did/{other}/credentials` is refused by name.
+	#
+	# The credential INVENTORY route (`/api/v1/credentials`) resolves its
+	# target to a fixed string rather than a DID, so it never matches an
+	# agent's own DID and stays closed to agents entirely.
+	"credential_read",
 }
 
 allow contains object.union(agent_self, {"reason": "AGENT_ACTING_ON_SELF"}) if {
@@ -94,8 +104,55 @@ deny contains object.union(agent_self, {"reason": "PRINCIPAL_IS_NOT_THE_SUBJECT"
 # action" is the single most important thing to see in an audit trail.
 approval_operations := {"approval_decide", "approval_view", "approval_cancel"}
 
+# PHASE 10. The one operation an agent performs about ANOTHER agent, kept in
+# its own set rather than folded into `self_operations` -- which is also what
+# the PRINCIPAL_IS_NOT_THE_SUBJECT rule keys on, and peer resolution is
+# deliberately NOT about yourself. Putting it there would have quietly
+# exempted every self-operation from the subject binding.
+peer_operations := {"identity_read"}
+
 deny contains object.union(agent_self, {"reason": "AGENT_MAY_NOT_ADMINISTER"}) if {
 	principal_is_agent
 	not input.operation in self_operations
 	not input.operation in approval_operations
+	not input.operation in peer_operations
+}
+
+# ---------------------------------------------------------------------------
+# PHASE 10: an agent may RESOLVE A PEER's identity
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS NOT A HOLE IN "an agent may act on ITSELF".
+#
+# Phase 3's discovery flow has a coordinator cross-check what the ANS told it
+# against the identity authority: does this DID exist, is it ACTIVE, and does
+# the endpoint ANS gave match the one published in the DID Document? That
+# check is what makes an endpoint substitution in the directory DETECTABLE --
+# ANS is a directory, and the DID Document is the trust anchor it does not
+# control.
+#
+# Phase 10 made reading the registry an authorized operation. Unsigned, that
+# cross-check became a 401 and quietly stopped being a cross-check: discovery
+# would still work, and the control that detects a poisoned directory would
+# be gone. That is a worse outcome than the disclosure it would have
+# prevented.
+#
+# SO IT IS GRANTED, AND NARROWLY:
+#
+#   * `identity_read` ONLY. Not credentials, not the audit trail, not
+#     approvals, not grants, not policy, not loans -- an agent still reaches
+#     none of those, about itself or anybody.
+#   * The agent must be AUTHENTICATED. This replaces an ANONYMOUS read with
+#     one that is attributable: the audit trail now names which agent
+#     resolved which peer.
+#   * It discloses nothing new. The same DID, status and endpoint are already
+#     published by the ANS directory and in the DID Document, both of which
+#     are deliberately public.
+#
+# NOTE WHAT IS STILL REFUSED: an agent performing `identity_read` has not
+# acquired any authority over the peer it resolved. Every action it then
+# attempts is decided by the data-plane PDP exactly as before.
+allow contains object.union(agent_self, {"reason": "AGENT_MAY_RESOLVE_PEER_IDENTITY"}) if {
+	principal_is_agent
+	input.operation == "identity_read"
 }

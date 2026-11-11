@@ -118,40 +118,40 @@ class TestReceiverBindingAtTheHttpBoundary:
 
 class TestTheReadSurface:
     async def test_transactions_are_listed_by_receiver(
-        self, submit_http, client, a2a_envelope, payments_agent,
+        self, submit_http, cp_get, a2a_envelope, payments_agent,
         payment_credential, a2a_policy_loaded,
     ):
         await submit_http(a2a_envelope(), payments_agent.did)
-        response = await client.get("/api/v1/a2a/transactions",
-                                    params={"receiver_did": payments_agent.did})
+        response = await cp_get("/api/v1/a2a/transactions",
+                                params={"receiver_did": payments_agent.did})
         assert response.status_code == 200
         assert len(response.json()) == 1
 
     async def test_transactions_are_listed_by_sender(
-        self, submit_http, client, a2a_envelope, payments_agent, risk_agent,
+        self, submit_http, cp_get, a2a_envelope, payments_agent, risk_agent,
         payment_credential, a2a_policy_loaded,
     ):
         await submit_http(a2a_envelope(), payments_agent.did)
-        response = await client.get("/api/v1/a2a/transactions",
-                                    params={"sender_did": risk_agent.did})
+        response = await cp_get("/api/v1/a2a/transactions",
+                                params={"sender_did": risk_agent.did})
         assert len(response.json()) == 1
 
     async def test_one_transaction_carries_its_envelope_and_attempts(
-        self, submit_http, client, a2a_envelope, payments_agent,
+        self, submit_http, cp_get, a2a_envelope, payments_agent,
         payment_credential, a2a_policy_loaded,
     ):
         """The ATTEMPTS matter as much as the record: a transaction with
         rejected attempts against it was probed."""
         envelope = a2a_envelope(transaction_id="txn-read")
         await submit_http(envelope, payments_agent.did)
-        response = await client.get("/api/v1/a2a/transactions/txn-read")
+        response = await cp_get("/api/v1/a2a/transactions/txn-read")
         assert response.status_code == 200
         body = response.json()
         assert body["envelope"]["transactionId"] == "txn-read"
         assert "attempts" in body
 
-    async def test_an_unknown_transaction_is_404(self, client):
-        assert (await client.get(
+    async def test_an_unknown_transaction_is_404(self, cp_get):
+        assert (await cp_get(
             "/api/v1/a2a/transactions/txn-nope")).status_code == 404
 
     async def test_health_reports_the_configuration_honestly(
@@ -164,8 +164,8 @@ class TestTheReadSurface:
         assert body["policy_configuration"]["loaded"] is True
         assert body["verification_required"] is True
 
-    async def test_the_instructions_are_labelled_synthetic(self, client):
-        for instruction in (await client.get("/api/v1/a2a/instructions")).json():
+    async def test_the_instructions_are_labelled_synthetic(self, cp_get):
+        for instruction in (await cp_get("/api/v1/a2a/instructions")).json():
             assert "SYNTHETIC" in instruction["disclaimer"]
 
 

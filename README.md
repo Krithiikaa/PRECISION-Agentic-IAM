@@ -28,7 +28,11 @@ Verifiable right now:
 ```bash
 docker compose up -d postgres redis opa keycloak
 scripts/run_local.sh                  # IAM API, ANS, 8 agent processes
-python3 scripts/seed_credentials.py   # issue the demo credential set
+
+cd backend                            # both scripts need the backend venv
+python3 ../scripts/seed_credentials.py       # demo credentials (1h TTL)
+python3 ../scripts/provision_mcp_clients.py  # Phase 8 OAuth clients
+cd ..
 
 python3 scripts/phase1_gate.sh        # 12/12   identity
 python3 scripts/phase2_gate.py        # 30/30   credentials
@@ -39,9 +43,19 @@ python3 scripts/phase5_gate.py        # 68/68   human-in-the-loop
 python3 scripts/phase55_gate.py       # 110/110 HITL hardening
 python3 scripts/phase6_gate.py        # 113/113 JIT temporary access
 python3 scripts/phase7_gate.py        # 132/132 secure A2A transactions
+python3 scripts/phase8_gate.py        # 38/38   MCP security
+python3 scripts/phase9_e2e.py         # 36/36   end-to-end, across all phases
 ```
 
-All nine gates run against the LIVE system -- a real PostgreSQL, a real OPA
+**Re-seed before every gate sweep.** Credentials carry a one-hour TTL, so a
+sweep run later fails with `PURPOSE_NOT_ALLOWED` everywhere -- which looks
+exactly like an authorization regression and is not one.
+
+Do not run the pytest suite at the same time as a gate sweep: both use the
+same OPA, and one test deliberately removes a policy data document to prove
+fail-closed behaviour.
+
+All eleven gates run against the LIVE system -- a real PostgreSQL, a real OPA
 evaluating real Rego, a real Keycloak and real agent processes. None of them
 is satisfied by a substitute.
 
@@ -126,16 +140,21 @@ backend/app/
   authorization/ enforcement/ sessions/ banking/ protocols/
                 ^ reserved for Phases 4-11, currently empty
 
-backend/tests/  1123 tests, run against a real PostgreSQL
+backend/tests/  1272 tests, run against a real PostgreSQL
 frontend/       React console: discovery, credentials, agents, live trace
-scripts/        run_local.sh, stop_local.sh, phase{1..7}_gate, restart tests,
-                provision_agents.py, seed_credentials.py, screenshot.py
-docs/           ARCHITECTURE, SECURITY_MODEL, API, DEMO, and one architecture
-                document per phase
+scripts/        run_local.sh, stop_local.sh, phase{1..8}_gate, phase9_e2e,
+                provision_agents.py, provision_mcp_clients.py,
+                seed_credentials.py, screenshot.py
+docs/           ARCHITECTURE, SECURITY_MODEL, API, DEMO, one architecture
+                document per phase, PHASE_10_SECURITY_ASSESSMENT,
+                PRODUCTION_DEPLOYMENT and OPERATIONS_RUNBOOK -- read those
+                three before deploying
 policies/       Rego: data plane (4), control plane (4.5), human approval (5),
                 loan amount bands (5.5), JIT issuance + use (6),
-                A2A transactions (7), and the data/ documents they read
-keycloak/       the Keycloak realm: human identities and roles (5, 7)
+                A2A transactions (7), MCP invocation (8), and the data/
+                documents they read
+keycloak/       the Keycloak realm: human identities and roles (5, 7), and
+                the MCP audience client scope for agent OAuth clients (8)
 data/seed/      synthetic banking data
 frontend/       React app (Phase 12, partial)
 ```
@@ -145,7 +164,7 @@ frontend/       React app (Phase 12, partial)
 ```bash
 cd backend
 set -a && . ../.env && set +a
-.venv/bin/python -m pytest tests -q              # all 1123
+.venv/bin/python -m pytest tests -q              # all 1272
 .venv/bin/python -m pytest tests -q -m "not llm" # skip the live-Ollama tests
 ```
 
@@ -211,6 +230,20 @@ cd backend && set -a && . ../.env && set +a
   policy-capped, revocable, and **every use is re-decided by the PDP**. Revoke
   the credential it rested on and the mandate stops working.
   See [docs/PHASE_6_ARCHITECTURE.md](docs/PHASE_6_ARCHITECTURE.md).
+- **Sensitive reads require a role** (Phase 10). Until Phase 10 every GET
+  answered anyone who could reach the port. Twenty-six routes now sit behind
+  the same control-plane guard as every mutation, with seven read operations
+  mapped to roles in Rego -- and an AUDITOR reads everything while an
+  IAM_ADMIN cannot open a loan file. Rate limiting is Redis-backed and
+  distributed; CORS is configuration; verifiable presentations are
+  single-use. See [PHASE_10_SECURITY_ASSESSMENT.md](docs/PHASE_10_SECURITY_ASSESSMENT.md).
+- **MCP is a transport, not a permission** (Phase 8). Agents reach protected
+  tools over MCP revision 2025-06-18 (a documented subset -- see
+  [PHASE_8_ARCHITECTURE.md](docs/PHASE_8_ARCHITECTURE.md) for the conformance
+  matrix), authenticating with OAuth 2.1 `private_key_jwt` signed by the
+  agent's OWN Phase 1 Ed25519 key, so no second credential root exists.
+  Listing a tool grants nothing; every call runs the same AEM -> PDP -> OPA
+  chain as the direct API. Implemented with ZERO new dependencies.
 - **Agent-to-agent transactions are signed and authorized** (Phase 7). A
   sender signs a canonical envelope with its Phase 1 key; the receiver relays
   it unchanged with its own control-plane proof; the IAM plane verifies it and

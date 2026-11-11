@@ -61,6 +61,7 @@ from app.identity.keys import KeyStore
 from app.jit.grant import JITBinding
 from app.jit.service import JITFact, JITService
 from app.protocols.a2a.service import A2AFact
+from app.protocols.mcp.service import MCPFact
 
 log = get_logger("authz.pip")
 
@@ -125,6 +126,12 @@ class PIPContext:
     # guards on `present == true`, so an ordinary Phase 1-6 request is decided
     # exactly as it was before Phase 7 existed.
     a2a: dict[str, Any] = field(default_factory=dict)
+    # Phase 8. The verdict about an MCP invocation, when this evaluation is
+    # deciding one. Absent means "this did not arrive over MCP", which is a
+    # fact and never a permissive default: every rule in
+    # `mcp/invocation.rego` guards on `present == true`, so an ordinary
+    # Phase 1-7 request is decided exactly as it was before Phase 8 existed.
+    mcp: dict[str, Any] = field(default_factory=dict)
     unavailable: dict[str, str] = field(default_factory=lambda: dict(UNAVAILABLE_ATTRIBUTES))
     collection_ms: float = 0.0
 
@@ -155,6 +162,7 @@ class PIPContext:
             "approval": self.approval,
             "jit": self.jit,
             "a2a": self.a2a,
+            "mcp": self.mcp,
             "unavailable": self.unavailable,
             "collection_ms": round(self.collection_ms, 2),
         }
@@ -180,7 +188,11 @@ class PolicyInformationPoint:
         self.jit = JITService(session, keystore, self.settings)
 
     async def collect(
-        self, request: AuthorizationRequest, *, a2a: "A2AFact | None" = None
+        self,
+        request: AuthorizationRequest,
+        *,
+        a2a: "A2AFact | None" = None,
+        mcp: "MCPFact | None" = None,
     ) -> PIPContext:
         """Gather what is true right now.
 
@@ -193,6 +205,11 @@ class PolicyInformationPoint:
         """
         started = time.perf_counter()
         a2a_fact = a2a or A2AFact.absent()
+        # Phase 8, injected for exactly the reason the A2A verdict is: the
+        # transport already authenticated the caller and bound the session
+        # before the PDP was asked, and re-deriving that here would be a
+        # second opinion that could disagree with the first.
+        mcp_fact = mcp or MCPFact.absent()
 
         # --- subject ------------------------------------------------------
         agent = await self.agents.get_by_did(request.subject.did)
@@ -214,6 +231,10 @@ class PolicyInformationPoint:
                 # able to see that the sender is unresolvable rather than
                 # being handed a blank where a verdict should be.
                 a2a=a2a_fact.to_dict(),
+                # Reported for an unknown subject too, for the same reason
+                # the A2A verdict is: policy must be able to see that the
+                # caller is unresolvable rather than being handed a blank.
+                mcp=mcp_fact.to_dict(),
             )
             context.collection_ms = (time.perf_counter() - started) * 1000
             return context
@@ -243,6 +264,7 @@ class PolicyInformationPoint:
             approval=await self._approval_fact(request),
             jit=await self._jit_fact(request),
             a2a=a2a_fact.to_dict(),
+            mcp=mcp_fact.to_dict(),
         )
         context.collection_ms = (time.perf_counter() - started) * 1000
         return context

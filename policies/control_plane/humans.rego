@@ -269,3 +269,80 @@ deny contains object.union(humans, {"reason": "AGENT_MAY_NOT_APPROVE"}) if {
 	principal_is_agent
 	input.operation in {"approval_decide", "approval_view", "approval_cancel"}
 }
+
+# ---------------------------------------------------------------------------
+# PHASE 10: the sensitive READ surface
+# ---------------------------------------------------------------------------
+#
+# Until Phase 10 every GET in this system answered anyone who could reach the
+# port. The Phase 9 probe found ten endpoints handing an anonymous caller the
+# audit trail, the credential inventory, the approval queue, human identities
+# and loan records.
+#
+# WHAT DECIDES READ ACCESS IS A ROLE, not merely having authenticated. The
+# table below is deliberately written as DATA rather than as one rule per
+# operation: a reviewer can see the whole matrix at once and spot a role that
+# has been given a domain it should not have, which is exactly the mistake a
+# rule-per-operation layout hides.
+#
+# LEAST PRIVILEGE, AND WHERE IT BITES:
+#
+#   AUDITOR reads everything. That IS the role -- oversight that cannot see
+#     the whole system is not oversight. It reads and can change nothing:
+#     every mutation operation denies it.
+#
+#   IAM_ADMIN administers identity, so it reads identity, credentials, the
+#     audit trail, the approval queue and grants. It does NOT read loans.
+#     An identity administrator has no business opening a customer's file,
+#     and the fact that it can suspend the agent that processes that file
+#     does not change the answer.
+#
+#   LOAN_OFFICER reads approvals and loans -- the file it is being asked to
+#     decide on. It does NOT read the agent registry, the credential
+#     inventory or the audit trail: deciding one loan requires none of them.
+#
+#   PAYMENT_OFFICER reads approvals and grants, which is where A2A payment
+#     instructions surface. It does NOT read loans: the payment bands and the
+#     loan bands are separate authorities on purpose.
+#
+# NOTE WHAT NO HUMAN ROLE HOLDS: `policy_read` is absent for LOAN_OFFICER and
+# PAYMENT_OFFICER. Knowing which rules are live tells a would-be evader
+# exactly which band to stay under.
+human_read_access := {
+	"AUDITOR": {
+		"identity_read", "credential_read", "audit_read",
+		"approval_read", "grant_read", "policy_read", "loan_read",
+	},
+	"IAM_ADMIN": {
+		"identity_read", "credential_read", "audit_read",
+		"approval_read", "grant_read", "policy_read",
+	},
+	"LOAN_OFFICER": {"approval_read", "loan_read"},
+	"PAYMENT_OFFICER": {"approval_read", "grant_read"},
+}
+
+allow contains object.union(humans, {"reason": "HUMAN_MAY_READ"}) if {
+	principal_is_human
+	some role, operations in human_read_access
+	has_human_role(role)
+	input.operation in operations
+}
+
+# An explicit denial so the audit trail is diagnostic rather than silent. A
+# person holding a real role who reaches for a domain it does not cover gets
+# a reason naming that, instead of falling through to default-deny and
+# looking identical to an unknown operation.
+deny contains object.union(humans, {"reason": "HUMAN_ROLE_MAY_NOT_READ_THIS"}) if {
+	principal_is_human
+	input.operation in {
+		"identity_read", "credential_read", "audit_read",
+		"approval_read", "grant_read", "policy_read", "loan_read",
+	}
+	not human_may_read
+}
+
+human_may_read if {
+	some role, operations in human_read_access
+	has_human_role(role)
+	input.operation in operations
+}

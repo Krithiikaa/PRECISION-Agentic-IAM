@@ -213,6 +213,71 @@ OPERATIONS: dict[str, ControlPlaneOperation] = {
         "a2a_administer", ControlPlaneClass.AUTHORIZED_MUTATION,
         "Administer the A2A transaction ledger.", "a2a_ledger",
     ),
+
+    # --- Phase 10: the sensitive READ surface -----------------------------
+    # Until Phase 10 every GET in this system answered anyone who could reach
+    # the port. Phase 9 probed it and found ten endpoints disclosing the audit
+    # trail, the credential inventory, the approval queue, human identities
+    # and loan records to an anonymous caller.
+    #
+    # WHY THESE ARE SEPARATE OPERATIONS rather than one `read` flag. Reading
+    # the audit trail and reading a loan applicant's name are different
+    # questions with different answers: the auditor needs the first and has no
+    # business with the second, and a single operation would have handed both
+    # to whoever needed either. Each operation below names ONE data domain, so
+    # a role can be given exactly the domains its job requires.
+    #
+    # WHY READS ARE NOT SIMPLY "AUTHENTICATED". A classification of
+    # AUTHENTICATED_READ would have meant any principal that could prove an
+    # identity could read everything. The roles are in
+    # `control_plane/humans.rego` and `control_plane/administration.rego`, so
+    # a reviewer reads the authorization in the policy set rather than
+    # inferring it from route decorators.
+    "identity_read": ControlPlaneOperation(
+        "identity_read", ControlPlaneClass.AUTHORIZED_READ,
+        "Read the agent registry: which identities exist and what they claim.",
+        "identity",
+    ),
+    "credential_read": ControlPlaneOperation(
+        "credential_read", ControlPlaneClass.AUTHORIZED_READ,
+        "Read the credential inventory, including status and verification "
+        "history.", "credential",
+    ),
+    # The audit trail is EVIDENCE. Reading it reveals every decision the
+    # system made, which agent asked for what, and which human approved it --
+    # a map of the whole operation to anyone who can fetch it.
+    "audit_read": ControlPlaneOperation(
+        "audit_read", ControlPlaneClass.AUTHORIZED_READ,
+        "Read the audit trail and the authorization decision history.",
+        "audit",
+    ),
+    # The approval QUEUE, distinct from `approval_view` which opens ONE
+    # approval and records that a human looked at it. Listing is a weaker
+    # operation and does not mark anything as viewed.
+    "approval_read": ControlPlaneOperation(
+        "approval_read", ControlPlaneClass.AUTHORIZED_READ,
+        "List pending approvals, human principals and the approval "
+        "configuration.", "approval",
+    ),
+    "grant_read": ControlPlaneOperation(
+        "grant_read", ControlPlaneClass.AUTHORIZED_READ,
+        "Read temporary mandates and the agent-to-agent transaction ledger.",
+        "grant",
+    ),
+    "policy_read": ControlPlaneOperation(
+        "policy_read", ControlPlaneClass.AUTHORIZED_READ,
+        "Read which policies are declared and which are live in the engine.",
+        "policy",
+    ),
+    # Loan records carry applicant names, customer identifiers and amounts.
+    # Its OWN operation, held by nobody who does not need it -- in particular
+    # NOT by the identity administrator, who administers agents and has no
+    # business reading a customer's file.
+    "loan_read": ControlPlaneOperation(
+        "loan_read", ControlPlaneClass.AUTHORIZED_READ,
+        "Read loan applications, including applicant and amount.",
+        "loan_application",
+    ),
 }
 
 # A resolver returns either a bare id, or a dict of target attributes when

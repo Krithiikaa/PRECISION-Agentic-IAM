@@ -72,7 +72,7 @@ def call(method, path, body=None, *, principal=None, agent=False, did=AGENT,
     if agent:
         data, headers = agent_headers(method, path, body, did, slug)
     elif principal:
-        data, headers = cp_sign.signed(principal, method, path, body)
+        data, headers = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -189,7 +189,7 @@ body = read_profile(GRANT)
 check("the resource is reached with the mandate", body.get("executed"), True)
 check("and the PDP still decided it", decision_of(body), "ALLOW")
 
-status, record = call("GET", f"/api/v1/jit/{GRANT}")
+status, record = call("GET", f"/api/v1/jit/{GRANT}", principal=cp_sign.IDENTITY_ADMIN)
 check("one use is recorded", record.get("uses"), 1)
 check("the budget is decremented", record.get("uses_remaining"), 2)
 
@@ -203,7 +203,7 @@ body = read_profile(GRANT, tool="get_payroll_record")
 check("the action is blocked", body.get("executed"), False)
 check("and refused BY NAME", reason_of(body), "JIT_GRANT_BINDING_MISMATCH")
 
-status, record = call("GET", f"/api/v1/jit/{GRANT}")
+status, record = call("GET", f"/api/v1/jit/{GRANT}", principal=cp_sign.IDENTITY_ADMIN)
 check("a blocked call does not spend the budget", record.get("uses"), 1)
 
 print("\n      A resource INSTANCE outside the mandate is refused too")
@@ -230,7 +230,7 @@ print(f"      reason: {reason_of(body)}")
 print("\n  SCENARIO 6  Editing the mandate's scope and expiry")
 print("      Every bound field is inside the signature.")
 
-status, full = call("GET", f"/api/v1/jit/{GRANT}")
+status, full = call("GET", f"/api/v1/jit/{GRANT}", principal=cp_sign.IDENTITY_ADMIN)
 artifact = full.get("artifact") or {}
 subject = dict(artifact.get("credentialSubject") or {})
 check("the scope is inside the signed body", subject.get("resource_type"),
@@ -352,7 +352,7 @@ for n in (1, 2):
 body = read_profile(BUDGET)
 check("the third use is refused", body.get("executed"), False)
 check("named as exhausted", reason_of(body), "JIT_GRANT_EXHAUSTED")
-status, spent = call("GET", f"/api/v1/jit/{BUDGET}")
+status, spent = call("GET", f"/api/v1/jit/{BUDGET}", principal=cp_sign.IDENTITY_ADMIN)
 check("and the mandate is EXHAUSTED", spent.get("status"), "EXHAUSTED")
 check("exhausted is not expired", spent.get("uses"), 2)
 
@@ -381,7 +381,7 @@ print("      Three separate PDP evaluations. Nothing was cached, and nothing")
 print("      was replayed -- the mandate removed the repeated ISSUANCE, not the")
 print("      repeated DECISION.")
 
-status, spent_multi = call("GET", f"/api/v1/jit/{MULTI}")
+status, spent_multi = call("GET", f"/api/v1/jit/{MULTI}", principal=cp_sign.IDENTITY_ADMIN)
 check("the budget records all three", spent_multi.get("uses"), 3)
 check("and the mandate is now EXHAUSTED", spent_multi.get("status"), "EXHAUSTED")
 
@@ -461,7 +461,7 @@ check("and the mandate works again", restored.get("executed"), True)
 # ---------------------------------------------------------------------------
 print("\n  TAMPERING  Editing a signed mandate breaks it, field by field")
 
-status, full_grant = call("GET", f"/api/v1/jit/{MONEY}")
+status, full_grant = call("GET", f"/api/v1/jit/{MONEY}", principal=cp_sign.IDENTITY_ADMIN)
 artifact = full_grant.get("artifact")
 check("the artifact is readable", bool(artifact), True)
 
@@ -531,7 +531,7 @@ check("a fresh mandate is issued", live.get("issued"), True)
 body = read_profile(LIVE)
 check("it works while the credential is good", body.get("executed"), True)
 
-status, creds = call("GET", f"/api/v1/credentials?subject={AGENT}")
+status, creds = call("GET", f"/api/v1/credentials?subject={AGENT}", principal=cp_sign.IDENTITY_ADMIN)
 capability = [
     c for c in (creds if isinstance(creds, list) else creds.get("items", []))
     if c.get("status") == "ACTIVE"
@@ -552,7 +552,7 @@ print("      The mandate is still perfectly signed, unexpired and unspent.")
 print("      It is the LIVE evaluation that refused -- which is what makes")
 print("      'revocation is invalid everywhere at once' still true.")
 
-status, still = call("GET", f"/api/v1/jit/{LIVE}")
+status, still = call("GET", f"/api/v1/jit/{LIVE}", principal=cp_sign.IDENTITY_ADMIN)
 check("the mandate record itself is untouched", still.get("status"), "ACTIVE")
 
 # ---------------------------------------------------------------------------
@@ -581,7 +581,7 @@ RACE = (race.get("grant") or {}).get("grant_id")
 check("a mandate with a budget of 3 is issued", race.get("issued"), True)
 for _ in range(2):
     read_profile(RACE)
-status, before_race = call("GET", f"/api/v1/jit/{RACE}")
+status, before_race = call("GET", f"/api/v1/jit/{RACE}", principal=cp_sign.IDENTITY_ADMIN)
 check("two uses are spent, one remains", before_race.get("uses_remaining"), 1)
 
 import concurrent.futures                                           # noqa: E402
@@ -599,7 +599,7 @@ check("every refusal names a real condition",
                   "JIT_GRANT_REVOKED"}, True)
 print(f"      refusal reasons: {', '.join(sorted(r for r in reasons if r))}")
 
-status, after_race = call("GET", f"/api/v1/jit/{RACE}")
+status, after_race = call("GET", f"/api/v1/jit/{RACE}", principal=cp_sign.IDENTITY_ADMIN)
 check("the budget is exactly spent, never overspent", after_race.get("uses"), 3)
 check("and the mandate is EXHAUSTED", after_race.get("status"), "EXHAUSTED")
 print("      A read-then-write would have let several through. One conditional")
@@ -656,7 +656,7 @@ print("\n  AUDIT  The whole arc, correlated by grant_id")
 # trail continuously, so any fixed limit is a race against how long the gate
 # took to get here.
 def audit(event_type, limit=200):
-    status, rows = call("GET", f"/api/v1/audit?event_type={event_type}&limit={limit}")
+    status, rows = call("GET", f"/api/v1/audit?event_type={event_type}&limit={limit}", principal=cp_sign.IDENTITY_ADMIN)
     return rows if isinstance(rows, list) else []
 
 

@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The well-known development master key.
@@ -219,6 +219,110 @@ class Settings(BaseSettings):
     # configuration file in front of it.
     a2a_verification_required: bool = True
 
+    # --- Phase 8: MCP security ---
+    # The canonical URI of this MCP server, per RFC 8707 section 2. It is the
+    # value an access token must carry as its audience, and the value a
+    # client must send as the `resource` parameter. No fragment, no trailing
+    # slash: RFC 9728 and the MCP spec both key off an exact string match, so
+    # a cosmetic difference here is an authentication failure later.
+    mcp_resource_uri: str = "http://localhost:8000/mcp"
+    mcp_resource_name: str = "agentic-iam-mcp"
+    # The audience claim required on an MCP access token. SEPARATE from
+    # `oidc_audience` on purpose: a token minted for the human console API
+    # must not be accepted here, and vice versa. Collapsing these two into
+    # one value would silently create exactly the cross-service token reuse
+    # the MCP authorization spec forbids.
+    mcp_audience: str = "agentic-iam-mcp"
+    # An ALLOWLIST, like `oidc_allowed_algorithms` and for the same reason:
+    # `none` and HS256 key-confusion are refused because they are not on it.
+    # Keycloak signs access tokens with the realm's RS256 key; EdDSA is used
+    # for the CLIENT ASSERTION at the token endpoint, which is Keycloak's
+    # side of the exchange and never validated here.
+    mcp_allowed_algorithms: str = "RS256"
+    # The MCP protocol revision this server implements. A single value, not a
+    # range: see docs/PHASE_8_ARCHITECTURE.md for the conformance matrix.
+    mcp_protocol_version: str = "2025-06-18"
+    # Revisions accepted during initialize negotiation. Only the implemented
+    # one, deliberately -- advertising a revision whose requirements are not
+    # met is the "partial conformance presented as compliance" this phase was
+    # explicitly told not to produce.
+    mcp_supported_protocol_versions: str = "2025-06-18"
+    # Origins permitted on the MCP endpoint. The transport spec requires
+    # Origin validation on ALL incoming connections to prevent DNS rebinding.
+    # An empty list means "no cross-origin browser client may connect", which
+    # is the correct default for a service-to-service endpoint and is NOT the
+    # same as "allow anything".
+    mcp_allowed_origins: str = ""
+    # How long an idle MCP session survives. A session is a correlation
+    # handle bound to an agent, not a credential, but an unbounded one is
+    # still a row that outlives the token that created it.
+    mcp_session_idle_seconds: int = 900
+    mcp_max_sessions_per_agent: int = 16
+    # The `_meta` key carrying the requested purpose. An IMPLEMENTATION
+    # EXTENSION, not part of MCP: `_meta` is the spec's sanctioned place for
+    # implementation metadata, and this prefix is non-reserved per the key
+    # naming rules (reserved prefixes are those containing `modelcontextprotocol`
+    # or `mcp` as a label). Documented as an extension and never described as
+    # a protocol feature.
+    mcp_purpose_meta_key: str = "agentic-iam.precisionit.co.in/purpose"
+    # MCP transport authentication is not configurable off, for the same
+    # reason fail-closed, control-plane authentication, HITL and A2A envelope
+    # verification are not.
+    mcp_authentication_required: bool = True
+
+    # --- Phase 10: rate limiting ---
+    # Not configurable OFF in production; see the validator below. A rate
+    # limit that an environment variable can remove is not a control.
+    ratelimit_enabled: bool = True
+    # Per-tier "requests,window_seconds". Tiers are resolved by path in
+    # app/ratelimit/middleware.py and asserted against the live route table
+    # by test_rate_limiting.py.
+    #
+    #   auth       credential, token and verification endpoints. TIGHTEST,
+    #              because this is where guessing and replay happen.
+    #   expensive  a full policy evaluation, and possibly a tool execution.
+    #   mutation   anything that changes state.
+    #   read       everything else.
+    ratelimit_auth: str = "20,60"
+    ratelimit_expensive: str = "60,60"
+    ratelimit_mutation: str = "120,60"
+    ratelimit_read: str = "300,60"
+    # What to do when Redis cannot be reached. "fail_closed" refuses the
+    # request; "fail_open_local" counts in process memory and WARNS on every
+    # request. The second is refused in production by the validator below:
+    # a per-process counter across N workers is an N-times-looser limit that
+    # reports itself as enforced.
+    ratelimit_redis_policy: str = "fail_open_local"
+    ratelimit_redis_timeout_seconds: float = 0.25
+    # Networks whose X-Forwarded-For this service will believe. EMPTY means
+    # believe nobody, which is correct unless there really is a proxy in
+    # front: a caller that can set its own forwarded address can mint itself
+    # a fresh rate-limit allowance on every request.
+    trusted_proxy_networks_raw: str = ""
+
+    # --- Phase 10: presentation replay protection ---
+    # How long a verifier challenge stays spendable. Short on purpose: a
+    # challenge is a single-use nonce, and a long-lived one is a permanent
+    # one-use token that is strictly worse to leak.
+    challenge_ttl_seconds: int = 300
+    # Whether a presentation MUST carry a challenge this verifier issued.
+    # True closes the Phase 2 replay gap outright. It is a setting rather
+    # than a constant because a verifier that genuinely does not need
+    # freshness (an offline audit of an archived presentation) should be
+    # able to say so explicitly rather than by omission.
+    challenge_required: bool = True
+
+    # --- Phase 10: CORS ---
+    # Was hardcoded to two localhost origins in main.py. Now configuration,
+    # and validated: a wildcard with credentials enabled is refused outright
+    # because browsers reject that combination anyway and configuring it
+    # means someone believes it works.
+    cors_allowed_origins: str = "http://localhost:5173,http://localhost:3000"
+    cors_allow_credentials: bool = True
+    cors_allowed_methods: str = "GET,POST,DELETE,OPTIONS"
+    cors_allowed_headers: str = "authorization,content-type,mcp-session-id,mcp-protocol-version"
+    cors_max_age_seconds: int = 600
+
     # --- LLM ---
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = Field(default="llama3:latest")
@@ -246,6 +350,128 @@ class Settings(BaseSettings):
                 "failure must never become ALLOW."
             )
         return v
+
+    # Every URL below carries something an attacker who could sit in the
+    # middle would be able to forge: a policy decision, a signing key, or a
+    # bearer token. Named here so the check is a list a reviewer can read
+    # rather than a condition buried in a loop.
+    _PRODUCTION_TLS_URLS = (
+        ("opa_url", "authorization decisions"),
+        ("keycloak_base_url", "the JWKS this service validates tokens against"),
+        ("keycloak_issuer", "the token issuer this service trusts"),
+        ("mcp_resource_uri", "the OAuth resource agents present tokens to"),
+        ("api_public_url", "the base URL this service advertises"),
+    )
+
+    @model_validator(mode="after")
+    def _production_requires_tls(self):
+        """In production, security-critical URLs must be https.
+
+        WHY THIS REFUSES TO START rather than warning. Each of these carries
+        something forgeable over plaintext:
+
+            opa_url            an ALLOW is a plain JSON body. Anyone who can
+                               rewrite it decides authorization.
+            keycloak_*         the JWKS is fetched over this URL. Substitute
+                               the keys and you mint tokens this service
+                               accepts; the signature check then passes
+                               honestly against the attacker's key.
+            mcp_resource_uri   agents present bearer tokens here, and the MCP
+                               authorization spec requires HTTPS.
+            api_public_url     the protected-resource metadata URL derives
+                               from it, so a plaintext value sends clients to
+                               a plaintext discovery document.
+
+        There is deliberately NO opt-out flag. This codebase already refuses
+        to start rather than let `AUTHORIZATION_FAIL_CLOSED`,
+        `CONTROL_PLANE_AUTHENTICATION_REQUIRED`, `HITL_ENABLED`,
+        `A2A_VERIFICATION_REQUIRED` or `MCP_AUTHENTICATION_REQUIRED` be
+        turned off, for the reason stated at each of them: a switch that
+        turns a security requirement into a no-op is a bypass with a
+        configuration file in front of it.
+
+        An operator terminating TLS at a sidecar or ingress still sets these
+        to the https public name -- that is the name clients resolve and the
+        name the metadata document must advertise, so it is the correct
+        value regardless of where the handshake ends.
+
+        DEVELOPMENT AND TEST ARE UNAFFECTED. The whole POC runs on plaintext
+        localhost and must keep doing so.
+        """
+        if self.env != "production":
+            return self
+
+        def redacted(url: str) -> str:
+            """The URL with any embedded credentials removed.
+
+            A validation error becomes a log line, a container event and
+            often a screenshot in a ticket. `http://user:password@host` is a
+            legal URL, so echoing the raw value verbatim would spill a
+            credential into all three while complaining about security. The
+            scheme and host are what the operator needs; the userinfo is not.
+            """
+            if "@" not in url:
+                return url
+            scheme, _, rest = url.partition("://")
+            _, _, host = rest.rpartition("@")
+            return f"{scheme}://***@{host}" if scheme else f"***@{host}"
+
+        insecure = [
+            (name, what, redacted(str(getattr(self, name))))
+            for name, what in self._PRODUCTION_TLS_URLS
+            if not str(getattr(self, name)).lower().startswith("https://")
+        ]
+        # --- rate limiting ---------------------------------------------
+        if not self.ratelimit_enabled:
+            raise ValueError(
+                "RATELIMIT_ENABLED cannot be false when ENV=production: an "
+                "abuse control that an environment variable removes is not a "
+                "control."
+            )
+        if self.ratelimit_redis_policy != "fail_closed":
+            raise ValueError(
+                "RATELIMIT_REDIS_POLICY must be 'fail_closed' when "
+                "ENV=production. 'fail_open_local' counts in PROCESS memory, "
+                "so across N workers the effective limit is N times what was "
+                "configured -- while every dashboard still reports the limit "
+                "as enforced. A silently unenforced rate limit is worse than "
+                "none, because nobody goes looking for it."
+            )
+
+        # --- CORS --------------------------------------------------------
+        # A wildcard origin WITH credentials is refused outright. Browsers
+        # reject that combination themselves, so configuring it means
+        # somebody believes it is working when it is not -- and the usual
+        # next step is to "fix" it by disabling something that matters.
+        if "*" in self.cors_origins and self.cors_allow_credentials:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS cannot be '*' while "
+                "CORS_ALLOW_CREDENTIALS is true: browsers refuse that "
+                "combination, so it is a misconfiguration that looks like a "
+                "permission."
+            )
+        for origin in self.cors_origins:
+            if origin == "*":
+                continue
+            if not origin.startswith("https://"):
+                raise ValueError(
+                    f"CORS_ALLOWED_ORIGINS entry {origin!r} must be https in "
+                    f"production: an http origin means the console's token "
+                    f"travels in clear."
+                )
+
+        if insecure:
+            lines = "; ".join(
+                f"{name.upper()} ({what}) is {value!r}"
+                for name, what, value in insecure
+            )
+            raise ValueError(
+                f"ENV=production requires https for every security-critical "
+                f"URL, and these are not: {lines}. Each of them carries "
+                f"something an attacker in the middle could forge -- a policy "
+                f"decision, a signing key, or a bearer token."
+            )
+        return self
 
     @field_validator("control_plane_authentication_required")
     @classmethod
@@ -279,9 +505,91 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("mcp_authentication_required")
+    @classmethod
+    def _mcp_must_authenticate(cls, v: bool) -> bool:
+        if v is not True:
+            raise ValueError(
+                "MCP_AUTHENTICATION_REQUIRED cannot be disabled: an "
+                "unauthenticated caller must never be able to list or invoke "
+                "a protected tool over MCP."
+            )
+        return v
+
+    @staticmethod
+    def _pair(raw: str, field: str) -> tuple[int, int]:
+        try:
+            limit, window = (int(part.strip()) for part in raw.split(","))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"{field} must be 'requests,window_seconds', got {raw!r}"
+            ) from exc
+        if limit < 1 or window < 1:
+            raise ValueError(f"{field} must be positive, got {raw!r}")
+        return limit, window
+
+    @property
+    def ratelimit_tiers(self) -> dict[str, tuple[int, int]]:
+        return {
+            "auth": self._pair(self.ratelimit_auth, "RATELIMIT_AUTH"),
+            "expensive": self._pair(self.ratelimit_expensive, "RATELIMIT_EXPENSIVE"),
+            "mutation": self._pair(self.ratelimit_mutation, "RATELIMIT_MUTATION"),
+            "read": self._pair(self.ratelimit_read, "RATELIMIT_READ"),
+        }
+
+    @property
+    def trusted_proxy_networks(self) -> list[str]:
+        return [n.strip() for n in self.trusted_proxy_networks_raw.split(",") if n.strip()]
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def cors_methods(self) -> list[str]:
+        return [m.strip().upper() for m in self.cors_allowed_methods.split(",") if m.strip()]
+
+    @property
+    def cors_headers(self) -> list[str]:
+        return [h.strip() for h in self.cors_allowed_headers.split(",") if h.strip()]
+
     @property
     def oidc_algorithms(self) -> list[str]:
         return [a.strip() for a in self.oidc_allowed_algorithms.split(",") if a.strip()]
+
+    @property
+    def mcp_token_algorithms(self) -> list[str]:
+        return [a.strip() for a in self.mcp_allowed_algorithms.split(",") if a.strip()]
+
+    @property
+    def mcp_protocol_versions(self) -> list[str]:
+        return [
+            v.strip() for v in self.mcp_supported_protocol_versions.split(",")
+            if v.strip()
+        ]
+
+    @property
+    def mcp_origins(self) -> list[str]:
+        return [o.strip() for o in self.mcp_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def mcp_scopes_supported(self) -> list[str]:
+        """Scopes advertised in the protected resource metadata.
+
+        DESCRIPTIVE, not load-bearing. Authorization in this system is decided
+        by Rego against verified credentials, not by an OAuth scope. The list
+        is published because RFC 9728 provides for it and a client may use it
+        to request a token; nothing downstream grants anything on its basis.
+        """
+        return ["mcp:invoke"]
+
+    @property
+    def mcp_resource_metadata_url(self) -> str:
+        """The RFC 9728 well-known location for this resource's metadata."""
+        return (
+            f"{self.mcp_resource_uri.rstrip('/').rsplit('/mcp', 1)[0]}"
+            f"/.well-known/oauth-protected-resource"
+        )
 
     @property
     def oidc_discovery_url(self) -> str:

@@ -36,9 +36,10 @@ def checks(report) -> dict[str, bool]:
 
 class TestBuildingPresentations:
     async def test_presentation_is_signed_by_the_holder_not_the_issuer(
-        self, presenter, issued_credential, risk_agent, issuers
+        self, fresh_challenge, presenter, issued_credential, risk_agent, issuers
     ):
-        document = await presenter.present(holder_did=risk_agent.did)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
 
         assert document["holder"] == risk_agent.did
         assert document["type"] == ["VerifiablePresentation"]
@@ -56,12 +57,12 @@ class TestBuildingPresentations:
         assert len(base64.b64decode(holder_proof["proofValue"])) == 64
 
     async def test_challenge_and_domain_are_bound_into_the_proof(
-        self, presenter, issued_credential, risk_agent
+        self, fresh_challenge, presenter, issued_credential, risk_agent
     ):
         document = await presenter.present(
-            holder_did=risk_agent.did, challenge="nonce-abc", domain="loan-service"
+            holder_did=risk_agent.did, challenge=fresh_challenge, domain="loan-service"
         )
-        assert document["proof"]["challenge"] == "nonce-abc"
+        assert document["proof"]["challenge"] == fresh_challenge
         assert document["proof"]["domain"] == "loan-service"
 
     async def test_presenting_with_nothing_to_present_fails(self, presenter, risk_agent):
@@ -88,11 +89,12 @@ class TestBuildingPresentations:
         with pytest.raises(IdentityError, match="holds its own key"):
             await presenter.present(holder_did=agent.did)
 
-    async def test_presentation_is_recorded(self, presenter, session, issued_credential,
+    async def test_presentation_is_recorded(self, fresh_challenge, presenter, session, issued_credential,
                                             risk_agent):
         from app.db.repositories.credentials import CredentialRepository
 
-        document = await presenter.present(holder_did=risk_agent.did)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
         records = await CredentialRepository(session).list_presentations(
             holder_did=risk_agent.did
         )
@@ -101,29 +103,37 @@ class TestBuildingPresentations:
 
 
 class TestVerifyingPresentations:
-    async def test_valid_presentation(self, presenter, presentation_verifier,
+    async def test_valid_presentation(self, fresh_challenge, presenter, presentation_verifier,
                                       issued_credential, risk_agent):
-        document = await presenter.present(holder_did=risk_agent.did, challenge="nonce-1")
-        report = await presentation_verifier.verify(document, expected_challenge="nonce-1")
+        document = await presenter.present(holder_did=risk_agent.did, challenge=fresh_challenge)
+        report = await presentation_verifier.verify(document, expected_challenge=fresh_challenge)
 
         assert report.valid
         assert report.reason == PresentationReason.VALID
         assert all(checks(report).values())
         assert [c.valid for c in report.credentials] == [True]
 
-    async def test_tampered_holder_proof_is_rejected(self, presenter, presentation_verifier,
+    async def test_tampered_holder_proof_is_rejected(self, fresh_challenge, presenter, presentation_verifier,
                                                      issued_credential, risk_agent):
-        document = await presenter.present(holder_did=risk_agent.did)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
         raw = bytearray(base64.b64decode(document["proof"]["proofValue"]))
         raw[0] ^= 0x01
         document["proof"]["proofValue"] = base64.b64encode(raw).decode()
 
+        # This presentation is hand-built WITHOUT a challenge, because the
+        # property under test is SUBJECT binding -- the fraud agent
+        # legitimately signing a credential about the risk agent. Freshness
+        # is tested in test_presentation_replay.py; requiring it here would
+        # make this test fail for the wrong reason.
+        presentation_verifier.settings = presentation_verifier.settings.model_copy(
+            update={"challenge_required": False})
         report = await presentation_verifier.verify(document)
         assert not report.valid
         assert report.reason == PresentationReason.HOLDER_PROOF_INVALID
 
     async def test_stolen_credential_cannot_be_presented_by_another_agent(
-        self, presenter, presentation_verifier, issued_credential, risk_agent, fraud_agent,
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent, fraud_agent,
         credential_issuer, issuer_did
     ):
         """The core reason holder proof exists.
@@ -140,13 +150,14 @@ class TestVerifyingPresentations:
         document = await presenter.present(holder_did=fraud_agent.did)
         document["verifiableCredential"] = [stolen]
 
-        report = await presentation_verifier.verify(document)
+        report = await presentation_verifier.verify(
+            document, expected_challenge=fresh_challenge)
         assert not report.valid
         # The holder proof no longer covers the swapped payload.
         assert report.reason == PresentationReason.HOLDER_PROOF_INVALID
 
     async def test_subject_mismatch_when_the_holder_proof_is_genuine(
-        self, session, keystore, presentation_verifier, issued_credential, risk_agent,
+        self, fresh_challenge, session, keystore, presentation_verifier, issued_credential, risk_agent,
         fraud_agent
     ):
         """Fraud agent legitimately signs a presentation of a credential about the risk agent."""
@@ -161,38 +172,48 @@ class TestVerifyingPresentations:
         signature = Signer(keystore).sign(fraud_agent.active_key.kid, unsigned.payload)
         document = attach_proof(unsigned, signature.signature_b64)
 
+        # Hand-built WITHOUT a challenge: the property under test is SUBJECT
+        # binding -- the fraud agent legitimately signing a credential about
+        # the risk agent. Freshness is covered by test_presentation_replay.py,
+        # and requiring it here would fail this test for the wrong reason.
+        presentation_verifier.settings = presentation_verifier.settings.model_copy(
+            update={"challenge_required": False})
         report = await presentation_verifier.verify(document)
         assert not report.valid
         assert checks(report)["holder_proof"] is True     # they really are the fraud agent
         assert report.reason == PresentationReason.CREDENTIAL_INVALID
         assert report.credentials[0].reason == Reason.SUBJECT_MISMATCH
 
-    async def test_challenge_mismatch_is_rejected(self, presenter, presentation_verifier,
+    async def test_challenge_mismatch_is_rejected(self, fresh_challenge, presenter, presentation_verifier,
                                                   issued_credential, risk_agent):
-        document = await presenter.present(holder_did=risk_agent.did, challenge="nonce-1")
+        document = await presenter.present(holder_did=risk_agent.did, challenge=fresh_challenge)
         report = await presentation_verifier.verify(document, expected_challenge="nonce-2")
         assert not report.valid
         assert report.reason == PresentationReason.CHALLENGE_MISMATCH
 
     async def test_revoked_credential_fails_inside_a_valid_presentation(
-        self, session, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, session, presenter, presentation_verifier, issued_credential, risk_agent
     ):
-        document = await presenter.present(holder_did=risk_agent.did)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
         await CredentialStatusService(session).revoke(
             issued_credential.credential_id, "COMPROMISED"
         )
 
-        report = await presentation_verifier.verify(document)
+        report = await presentation_verifier.verify(
+            document, expected_challenge=fresh_challenge)
         assert not report.valid
         assert checks(report)["holder_proof"] is True
         assert report.reason == PresentationReason.CREDENTIAL_INVALID
         assert report.credentials[0].reason == Reason.REVOKED
 
-    async def test_unknown_holder_is_rejected(self, presenter, presentation_verifier,
+    async def test_unknown_holder_is_rejected(self, fresh_challenge, presenter, presentation_verifier,
                                               issued_credential, risk_agent):
-        document = await presenter.present(holder_did=risk_agent.did)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
         document["holder"] = "did:poc:agent:ghost-001"
-        report = await presentation_verifier.verify(document)
+        report = await presentation_verifier.verify(
+            document, expected_challenge=fresh_challenge)
         assert not report.valid
         assert report.reason == PresentationReason.HOLDER_UNKNOWN
 
@@ -202,13 +223,23 @@ class TestVerifyingPresentations:
         assert report.reason == PresentationReason.MALFORMED
 
     async def test_required_claims_apply_to_presented_credentials(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
-        document = await presenter.present(holder_did=risk_agent.did)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
         ok = await presentation_verifier.verify(
-            document, required_claims={"capability": "credit_analysis"}
+            document, expected_challenge=fresh_challenge,
+            required_claims={"capability": "credit_analysis"},
         )
         assert ok.valid
+
+        # THE SAME PRESENTATION, VERIFIED AGAIN. Its challenge is now spent,
+        # which is the Phase 10 behaviour -- so this second check is about
+        # required claims only and does not re-present the challenge. (That
+        # a replay WOULD be refused is asserted in
+        # test_presentation_replay.py.)
+        presentation_verifier.settings = presentation_verifier.settings.model_copy(
+            update={"challenge_required": False})
         bad = await presentation_verifier.verify(
             document, required_claims={"capability": "payroll_access"}
         )
@@ -225,26 +256,26 @@ class TestAudienceBinding:
     """
 
     async def test_matching_domain_verifies(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
         document = await presenter.present(
-            holder_did=risk_agent.did, challenge="n1", domain="loan-service"
+            holder_did=risk_agent.did, challenge=fresh_challenge, domain="loan-service"
         )
         report = await presentation_verifier.verify(
-            document, expected_challenge="n1", expected_domain="loan-service"
+            document, expected_challenge=fresh_challenge, expected_domain="loan-service"
         )
         assert report.valid
         assert checks(report)["domain"] is True
 
     async def test_presentation_for_another_audience_is_rejected(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
         """The relay this fix exists to stop."""
         document = await presenter.present(
-            holder_did=risk_agent.did, challenge="n1", domain="loan-service"
+            holder_did=risk_agent.did, challenge=fresh_challenge, domain="loan-service"
         )
         report = await presentation_verifier.verify(
-            document, expected_challenge="n1", expected_domain="payments-service"
+            document, expected_challenge=fresh_challenge, expected_domain="payments-service"
         )
         assert not report.valid
         assert report.reason == PresentationReason.DOMAIN_MISMATCH
@@ -253,12 +284,12 @@ class TestAudienceBinding:
         assert checks(report)["holder_proof"] is True
 
     async def test_missing_domain_fails_when_an_audience_is_required(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
-        document = await presenter.present(holder_did=risk_agent.did, challenge="n1")
+        document = await presenter.present(holder_did=risk_agent.did, challenge=fresh_challenge)
         assert "domain" not in document["proof"]
         report = await presentation_verifier.verify(
-            document, expected_challenge="n1", expected_domain="loan-service"
+            document, expected_challenge=fresh_challenge, expected_domain="loan-service"
         )
         assert not report.valid
         assert report.reason == PresentationReason.DOMAIN_MISMATCH
@@ -267,7 +298,7 @@ class TestAudienceBinding:
         )
 
     async def test_tampering_with_the_domain_breaks_the_holder_proof(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
         """The domain is signature-covered, so it cannot be rewritten in transit.
 
@@ -276,25 +307,25 @@ class TestAudienceBinding:
         checked before the audience comparison is ever reached.
         """
         document = await presenter.present(
-            holder_did=risk_agent.did, challenge="n1", domain="loan-service"
+            holder_did=risk_agent.did, challenge=fresh_challenge, domain="loan-service"
         )
         document["proof"]["domain"] = "payments-service"
         report = await presentation_verifier.verify(
-            document, expected_challenge="n1", expected_domain="payments-service"
+            document, expected_challenge=fresh_challenge, expected_domain="payments-service"
         )
         assert not report.valid
         assert report.reason == PresentationReason.HOLDER_PROOF_INVALID
         assert checks(report)["holder_proof"] is False
 
     async def test_no_expected_domain_preserves_existing_behaviour(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
         """Documented compatibility behaviour: a verifier that declares no
         audience does not get to demand one. Existing callers are unaffected."""
         document = await presenter.present(
-            holder_did=risk_agent.did, challenge="n1", domain="loan-service"
+            holder_did=risk_agent.did, challenge=fresh_challenge, domain="loan-service"
         )
-        report = await presentation_verifier.verify(document, expected_challenge="n1")
+        report = await presentation_verifier.verify(document, expected_challenge=fresh_challenge)
         assert report.valid
         assert checks(report)["domain"] is True
         # The declared audience is still reported, not silently discarded.
@@ -303,11 +334,13 @@ class TestAudienceBinding:
         )
 
     async def test_an_existing_domainless_presentation_still_verifies(
-        self, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, presenter, presentation_verifier, issued_credential, risk_agent
     ):
         """Backwards compatibility for presentations minted before this change."""
-        document = await presenter.present(holder_did=risk_agent.did)
-        report = await presentation_verifier.verify(document)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
+        report = await presentation_verifier.verify(
+            document, expected_challenge=fresh_challenge)
         assert report.valid
         assert all(checks(report).values())
 
@@ -316,13 +349,15 @@ class TestVerificationEventCorrelation:
     """S-3: credential -> presentation -> verification event -> presentation_id."""
 
     async def test_verification_inside_a_presentation_records_its_id(
-        self, session, presenter, presentation_verifier, issued_credential, risk_agent
+        self, fresh_challenge, session, presenter, presentation_verifier, issued_credential, risk_agent
     ):
         from sqlalchemy import select
         from app.db.models.credential import CredentialVerificationEvent
 
-        document = await presenter.present(holder_did=risk_agent.did)
-        report = await presentation_verifier.verify(document)
+        document = await presenter.present(
+            holder_did=risk_agent.did, challenge=fresh_challenge)
+        report = await presentation_verifier.verify(
+            document, expected_challenge=fresh_challenge)
         assert report.valid
 
         rows = (

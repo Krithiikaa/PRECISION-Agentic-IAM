@@ -4,6 +4,13 @@ from app.db.models.a2a import (
     A2ATransactionAttempt,
     A2ATransactionStatus,
 )
+from app.db.models.challenge import PresentationChallenge
+from app.db.models.mcp import (
+    MCPInvocation,
+    MCPInvocationStatus,
+    MCPSession,
+    MCPSessionStatus,
+)
 from app.db.models.agent import (
     Agent,
     AgentKey,
@@ -65,6 +72,11 @@ __all__ = [
     "A2ATransaction",
     "A2ATransactionAttempt",
     "A2ATransactionStatus",
+    "PresentationChallenge",
+    "MCPInvocation",
+    "MCPInvocationStatus",
+    "MCPSession",
+    "MCPSessionStatus",
     "Agent",
     "AgentKey",
     "AgentRelationship",

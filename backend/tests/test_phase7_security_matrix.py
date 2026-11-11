@@ -577,18 +577,68 @@ class TestNoRegression:
         assert decision.decision is Decision.ALLOW
         assert decision.evaluation["pip"]["a2a"]["present"] is False
 
-    async def test_the_aem_enforce_signature_is_unchanged(self):
+    async def test_the_aem_enforce_signature_is_additive_only(self):
+        """`enforce()` may GAIN an optional parameter; it may not change.
+
+        PHASE 7 WROTE THIS TEST AS `..._is_unchanged`, pinning an exact set,
+        because Phase 7 promised to leave `enforce()` alone and gave A2A its
+        own `enforce_a2a()` method instead.
+
+        PHASE 8 DELIBERATELY ADDED ONE PARAMETER, `mcp`, and this test was
+        widened to say so rather than deleted. The reasoning, recorded here
+        because a future reader will rightly be suspicious of a loosened
+        guard:
+
+        An MCP tools/call asks the SAME question as the direct API -- may
+        this agent perform this action on this resource for this purpose --
+        so giving it an `enforce_mcp()` twin would have meant a second copy
+        of escalation, grant minting, spending and execution. Two copies of
+        an authorization path is the thing this architecture most needs not
+        to have; the one that drifted would be the one an attacker used.
+        (A2A earned its own method for the opposite reason: it must verify a
+        signed envelope and derive the tool from it BEFORE any of this runs.)
+
+        THE GUARD IS STRONGER THAN IT WAS, not weaker. It still pins the
+        exact parameter set, and it now also asserts that everything Phase 8
+        added is optional and defaults to None -- so no caller written
+        before Phase 8 can behave differently because of it. That second
+        assertion is what the original test was really protecting, and it
+        was previously only implied.
+        """
         import inspect
 
         from app.enforcement.aem import AdapterEnforcementMiddleware
 
-        parameters = set(inspect.signature(
-            AdapterEnforcementMiddleware.enforce).parameters)
-        assert parameters == {
+        signature = inspect.signature(AdapterEnforcementMiddleware.enforce)
+        original = {
             "self", "subject_did", "tool_name", "arguments", "purpose",
             "request_id", "context", "credentials", "approval_id",
             "jit_grant_id",
         }
+        added = {"mcp"}
+        assert set(signature.parameters) == original | added
+
+        for name in added:
+            parameter = signature.parameters[name]
+            assert parameter.default is None, (
+                f"{name!r} must default to None, or a caller from an earlier "
+                f"phase could behave differently because Phase 8 exists"
+            )
+
+    async def test_the_aem_enforce_works_without_the_phase_8_argument(
+        self, aem, risk_agent, issued_credential, policies_loaded,
+    ):
+        """The other half of the guard above, asserted behaviourally.
+
+        A signature check proves the default exists; this proves the default
+        WORKS -- that an untouched Phase 4 call still runs end to end.
+        """
+        result = await aem.enforce(
+            subject_did=risk_agent.did, tool_name="get_credit_profile",
+            arguments={"customer_id": "customer-007"},
+            purpose="loan_assessment",
+        )
+        assert result.executed is True
 
     async def test_the_pdp_decide_works_without_an_a2a_argument(
         self, pdp, authz_request, risk_agent, issued_credential

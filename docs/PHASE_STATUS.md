@@ -46,9 +46,10 @@ Last audit: **2026-08-30** — see [../PHASE_2_3_AUDIT.md](../PHASE_2_3_AUDIT.md
 | S-6 `/agents/{id}/sign` and `/identity/sign` are unauthenticated signing oracles | HIGH | **FIXED** (Phase 4.5) |
 | S-7 Phase 1/2 identity control plane unauthenticated (agent creation and status change, credential issuance and revocation, holder-proof production, audit ingest) | HIGH | **FIXED** (Phase 5) |
 
-Tests: **1123 passing, 0 failures, 0 skips.** Phase 1-3
+Tests: **1272 collected, 1272 passing, 0 failures, 0 skips.** Phase 1-3
 baseline was 247; Phase 4 added 127; Phase 4.5 added 66; Phase 5 added 127;
-Phase 5.5 added 97; Phase 6 added 192; Phase 7 added 267.
+Phase 5.5 added 97; Phase 6 added 192; Phase 7 added 267; Phase 8 added 94;
+Phase 9 added 55.
 
 HOST NOTE, recorded because it is a real constraint rather than a flake: the
 live Ollama generation test and the Phase 3 gate's coordinator steps need
@@ -61,8 +62,40 @@ Keycloak stopped.
 
 Live gates: Phase 1 **12/12**, Phase 2 **30/30**, Phase 3 **40/40**,
 Phase 4 **31/31**, Phase 4.5 **46/46**, Phase 5 **68/68**,
-Phase 5.5 **110/110**, Phase 6 **113/113**, Phase 7 **132/132**.
-All nine confirmed green in one sweep on 2026-10-22.
+Phase 5.5 **110/110**, Phase 6 **113/113**, Phase 7 **132/132**,
+Phase 8 **38/38**, Phase 9 end-to-end **36/36**.
+The first nine were confirmed green in one sweep on 2026-10-22; Phase 8 was
+added and confirmed on 2026-10-24; all eleven were re-confirmed in one sweep
+on 2026-11-03.
+
+GATE PREREQUISITE, recorded because it has now cost two debugging sessions:
+capability credentials carry a 3600-second TTL, so a gate sweep run more than
+an hour after the last seeding fails with `RESOURCE_NOT_ALLOWED` or
+`PURPOSE_NOT_ALLOWED` everywhere. That looks exactly like an authorization
+regression and is not one. Run `scripts/seed_credentials.py` first. Phase 8
+additionally needs `scripts/provision_mcp_clients.py`.
+
+ONE TEST WAS WIDENED IN PHASE 8, and it is recorded here rather than left
+for a reviewer to find. `test_the_aem_enforce_signature_is_unchanged` pinned
+the exact parameter set of `AEM.enforce()`, because Phase 7 promised to leave
+that method alone and gave A2A its own `enforce_a2a()` instead. Phase 8 added
+one optional parameter, `mcp`, and renamed the test to
+`test_the_aem_enforce_signature_is_additive_only`.
+
+The reasoning: an MCP `tools/call` asks the SAME question as the direct API,
+so an `enforce_mcp()` twin would have meant a second copy of escalation,
+grant minting, spending and execution -- a parallel authorization path, which
+is the thing this architecture most needs not to have. (A2A earned its own
+method for the opposite reason: it must verify a signed envelope and derive
+the tool from it before any of that runs.)
+
+The guard is STRONGER than it was: it still pins the exact parameter set, and
+it now also asserts that everything Phase 8 added is optional and defaults to
+None, so no caller written before Phase 8 can behave differently. A second,
+behavioural test asserts an untouched Phase 4 call still runs end to end.
+Two further Phase 7 guards -- that the MCP package contains no second JSON
+serialisation, and that the AEM does not second-guess the PDP -- were left
+untouched and the CODE was changed to satisfy them.
 
 Two gate assertions were rewritten in Phase 7, and neither weakened a control.
 The Phase 4.5 gate hardcoded "7 agents" and now derives the count from the
@@ -85,7 +118,244 @@ version whose `site-packages` it does not share, so every entry point failed wit
 `ModuleNotFoundError`. Fixed by repointing `.venv/bin/python3` at
 `/usr/bin/python3.13`. No dependency was reinstalled and no code changed.
 
-Next: **Phase 8 — MCP tool gateway** (NOT started).
+Next: **nothing planned.** Phase 10 was the final engineering phase; see
+[PHASE_10_SECURITY_ASSESSMENT.md](PHASE_10_SECURITY_ASSESSMENT.md) for the
+final findings, [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md) for
+deployment, and [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) for backup
+and key rotation.
+
+## Phase 10 — what is real
+
+Final production security hardening. **Every Phase 9 HIGH and MEDIUM finding
+is closed**, and the HIGH one is verified on a running system.
+
+* **The read API is authenticated.** 26 routes now carry the SAME
+  `ControlPlaneGuard` as every mutation -- no new auth layer was built,
+  because the guard already accepted either a human OIDC token or a signed
+  machine proof and already decided in Rego. Seven read operations, one per
+  data domain, mapped to roles.
+
+  The separations are the point, and each is a named test: **IAM_ADMIN
+  cannot read a loan** (it administers agents; suspending the agent that
+  processes a file does not give it the file); LOAN_OFFICER cannot read the
+  audit trail or the registry; **no officer role can read the policy set**,
+  because knowing which rules are live is the first half of evading them;
+  and the enforcement gateway reads nothing at all.
+
+  `tests/test_route_security_inventory.py` walks the WHOLE route table, so a
+  sensitive route added later with no guard fails by name. A route is public
+  only if it is written in the allow-list with a reason.
+
+* **Rate limiting is distributed.** Redis-backed sliding window, one atomic
+  Lua script, keyed on identity before address. `X-Forwarded-For` is ignored
+  unless the peer is a configured trusted proxy -- otherwise a caller mints
+  a fresh allowance per request by setting a header. A Redis outage is never
+  silent: production requires `fail_closed`, because a per-process counter
+  across N workers is an N-times-looser limit that still reports as
+  enforced. ZERO new dependencies -- `redis==5.2.1` was already declared.
+
+* **Presentations are single-use.** The challenge ledger closes a gap this
+  codebase had documented since PHASE 2 and carried through Phase 9.
+  Recorded at issue (so an invented value is refused), bound to its
+  verifier, expiring, and spent by one atomic conditional UPDATE -- 20
+  concurrent presentations of one challenge spend it exactly once.
+
+  ONE ORDERING DECISION WORTH RECORDING: the spend happens after the domain
+  check, not before. Spending first would let an attacker relay a captured
+  presentation to the WRONG verifier purely to burn the victim's challenge,
+  turning replay protection into a denial-of-service against the legitimate
+  holder. Found by a Phase 9 test failing for the wrong reason.
+
+* **Redis is no longer an unused dependency.** It is the rate-limit backend,
+  and in production an outage is an API outage by design.
+
+* **CORS is configuration**, and production refuses a wildcard with
+  credentials or any plaintext origin. Two tests assert that CORS is NOT
+  authorization: a request from a permitted origin with no credentials is
+  still refused by the route guard.
+
+* **`ApprovalAuthority.rotate()` was re-inspected and NOT modified.** No
+  defect was found: atomic retirement, a lost race raises `ConflictError`
+  rather than creating a second active key, an orphaned keystore entry is
+  refused, and a post-generation failure deletes the new key before
+  re-raising.
+
+### Phase 10 — known gaps
+
+* **No independent security review.** Still the most significant open item,
+  and nothing in this repository substitutes for one.
+* **TLS, certificates and secrets are the operator's.** The application
+  refuses to start without https in production; it cannot provide it.
+* **Demo users remain in the realm file** and must be removed before
+  deployment. NOT enforced by code -- the likeliest checklist item to be
+  forgotten.
+* **Read authorization is domain-scoped, not row-scoped.** `audit_read`
+  grants the trail, not a filtered view of it.
+* **Service-to-service mTLS is not implemented** -- a trusted-segment model,
+  accepted and documented.
+* **No disaster-recovery rehearsal, no RPO/RTO, no load testing, no
+  monitoring.**
+
+## Phase 9 — what is real
+
+Final integration, security validation and release readiness:
+[PHASE_9_RELEASE.md](PHASE_9_RELEASE.md).
+
+**The headline is a refusal, not a claim: the system is complete and
+internally consistent as a POC, and it is NOT production-ready.** One HIGH
+finding remains open by design (the read API is unauthenticated), because
+closing it means changing the read authentication model across ten routes,
+five gate scripts and the console -- a broader change than a final hardening
+pass should make, and one whose shape is a product decision.
+
+* **All ten prior phases were verified against the running system**, not read
+  off their phase markers. Seven cross-phase end-to-end scenarios
+  (`scripts/phase9_e2e.py`) exercise the seams: identity to audit, revocation,
+  MCP discovery versus invocation, A2A, human approval, JIT bounds, and
+  unauthenticated refusal.
+
+* **No privileged mutation is reachable anonymously.** Probed live (11/11
+  refused) and then asserted structurally over the WHOLE route table in
+  `tests/test_unauthenticated_surface.py`, so a mutating route added later is
+  covered without anyone remembering to write a test.
+
+* **THREE GENUINE DEFECTS WERE FOUND AND FIXED:**
+
+  `ENV=production` accepted plaintext `http://` for the OPA URL, the Keycloak
+  base and issuer, the MCP resource URI and the advertised API base. Each
+  carries something forgeable in the middle -- a policy decision, a signing
+  key, a bearer token. Substituting the JWKS is the worst: tokens then verify
+  honestly against the attacker's key. Now refuses to start, with no opt-out,
+  matching every other security switch here.
+
+  **Policy deactivation silently reverted within 15 seconds.** The manifest
+  declares every policy `"status": "ACTIVE"` because it describes the
+  SHIPPED set; the RUNNING state lives in the database, which is what
+  `/policies/{id}/deactivate` writes. But `reconcile()` and `load_all()`
+  read only the manifest, so a deliberately-disabled policy looked exactly
+  like one missing because OPA had restarted -- and the 15-second
+  reconciler pushed it back in, logging `policy_set_incomplete ...
+  reloading`, which reads like recovery. An operator disabling a rule to
+  contain an incident would have watched it return. Found via an
+  INTERMITTENT Phase 6 gate failure (112/113 once, 113/113 twice); the
+  underlying control was deterministic in isolation, which is what made the
+  intermittency worth chasing. The database's verdict now outranks the
+  manifest in both paths; engine-restart recovery is untouched and has its
+  own test.
+
+  `provision_mcp_clients.py` read ONE keystore, but `provision_agents.py`
+  gives each agent its own `.keystore-agents/<slug>/` -- correct key custody,
+  and the reason the script silently skipped all ten deployed agents and
+  provisioned only two probes. MCP was provisionable for nobody real. Fixed;
+  all ten provision.
+
+* **Dependencies unchanged.** `requirements.txt` untouched across Phases 8
+  and 9; no installed version moved.
+
+### Phase 9 — known gaps
+
+* **HIGH: the read API is unauthenticated.** 10 of 12 probed read endpoints
+  serve an anonymous caller: the audit trail, credential inventory, agent
+  registry, approval queue, human principals, loan records and decision
+  history. Synthetic data, but the shape is the point. Remediation is in
+  PHASE_9_RELEASE.md §4.
+* **MEDIUM: no rate limiting** anywhere, including the MCP endpoint.
+* **MEDIUM: CORS origins are hardcoded** to localhost. Fails safe, but needs
+  a code change to deploy a real console.
+* **LOW: seeding accumulates credentials** rather than replacing them.
+* **TLS is not configured.** The new guard forces https URLs in production;
+  terminating TLS is still the operator's job.
+
+## Phase 8 — what is real
+
+Design and conformance matrix: [PHASE_8_ARCHITECTURE.md](PHASE_8_ARCHITECTURE.md).
+
+**Scope statement, stated first because overstating it would be the easiest
+mistake here: this is an implementation of a DOCUMENTED SUBSET of MCP
+revision 2025-06-18, not a complete MCP implementation.** Section 3 of the
+architecture document enumerates what is implemented and tested, what is not
+applicable, what is intentionally unsupported, and what remains unverified.
+
+* **ZERO new runtime dependencies.** `requirements.txt` is unchanged and no
+  installed version moved. The official `mcp` SDK (2.3.0) was measured and
+  rejected: it requires `pydantic>=2.12` against this project's pinned
+  2.10.4, plus `anyio>=4.9` and a second HTTP stack -- 18 packages in all.
+  Upgrading the model layer of a security system to gain a transport helper
+  is the wrong trade, so the wire protocol is implemented directly on
+  FastAPI. The cost is that conformance is ours to prove, which
+  `test_mcp_conformance.py` does by quoting the spec clause each test
+  asserts.
+
+* **No second credential root.** An agent authenticates to Keycloak with
+  `private_key_jwt` / **EdDSA**, signing the assertion with the SAME Ed25519
+  key it has held since Phase 1. Its Keycloak `clientId` IS its DID, so the
+  access token's `azp` carries the DID verbatim. No client secret is
+  created, and the private key never leaves the KeyStore. Verified end to
+  end against live Keycloak by `scripts/phase8_gate.py`.
+
+* **Identity binds on `azp`, never on `sub`.** `sub` is a Keycloak
+  service-account UUID unrelated to the agent. Binding on it would
+  authenticate successfully and attribute the call to the wrong principal.
+  Tested by giving the two claims different values.
+
+* **A valid token is not a valid agent.** Keycloak knows nothing about agent
+  lifecycle, so a token stays cryptographically valid after an agent is
+  suspended. The PIP re-reads agent and credential state inside EVERY
+  evaluation, which is what makes revocation effective within a token's
+  lifetime -- tested in both directions.
+
+* **Discovery is not permission.** `tools/list` returns the catalogue
+  unfiltered, without consulting policy. Deliberate: a list that shrank with
+  the caller's credentials would be an oracle for which credentials an agent
+  holds, and filtering would put a second copy of "what may be called"
+  beside the real one in Rego. An agent can see a tool it may never call.
+
+* **`mcp/invocation.rego` contributes DENY rules only**, and that is the
+  central decision of the phase. MCP is a transport for actions other
+  modules already decide, so an `allow` here would be a SECOND way to permit
+  something that already had one -- and under deny-overrides a second allow
+  is a widening. The channel can narrow what is reachable; it can never
+  widen it.
+
+* **Zero new cross-module Rego names.** `decision.rego` and
+  `security/sensitive.rego` are untouched, exactly as in Phase 7.
+
+* **Payments are not reachable over MCP.** `execute_payment` is absent from
+  the eligible actions. Over A2A a payment arrives inside an envelope signed
+  by the instructing agent's key, bound to a receiver and reconciled four
+  times; an MCP call carries a bearer token and nothing else. Exposing
+  payments here would be a strictly weaker path to the same action.
+
+* **HITL and dual control survive the channel.** `approve_loan` IS
+  MCP-eligible, which is not the same as performable: an MCP client can at
+  most open an approval request, and a high-value application still requires
+  two distinct humans.
+
+* **The purpose problem is solved without inventing a protocol field.**
+  `tools/call` has no purpose, so the client states one in `params._meta`
+  under a non-reserved key -- an extension of this deployment, documented as
+  one and never described as part of MCP. The statement is a SELECTOR, never
+  a grant: `allowed_purposes` in `decision.rego` derives only from
+  credentials the Phase 2 verifier accepted, so a purpose no credential
+  attests is denied.
+
+### Phase 8 — known gaps
+
+* **No interoperability test against a third-party MCP client.** The
+  conformance evidence is a spec-quoting test suite, not an interop run
+  against Claude Desktop or an SDK client. This is the largest gap in the
+  evidence and is recorded as "unverified" rather than claimed.
+* **Plaintext HTTP.** The POC runs on `http://localhost`; the MCP
+  authorization spec requires HTTPS for authorization endpoints.
+* **Tool arguments are stored unredacted.** Safe for the current tool set,
+  which takes record identifiers; a tool taking a secret would need a
+  redaction policy first.
+* **Keycloak client lifecycle is a separate script**, not automatic on agent
+  registration. Revocation is still effective because the PDP decides.
+* **No rate limiting.** Exactly-once deduplication is not a rate limit.
+* **No legal non-repudiation.** A bearer token proves possession, not
+  authorship. Nothing in this phase produces a signed record of intent the
+  way an A2A envelope does -- which is precisely why payments are excluded.
 
 ## Phase 7 — what is real
 
@@ -276,7 +546,10 @@ Model: [HITL_SECURITY_MODEL.md](HITL_SECURITY_MODEL.md).
   `UPDATE ... RETURNING`. Exactly one concurrent caller wins.
 * **Token storage:** the console's access token moved from `sessionStorage` to
   memory only. This reduces exposure; it is **not** XSS protection, and the doc
-  says so. A BFF would be Phase 9's Session Authority.
+  says so. A BFF would fix it properly. NOTE (Phase 9): the Session Authority
+  this once pointed at was never built -- Phase 9 became final integration
+  and release readiness instead, and no further phase is planned. The gap is
+  real and remains open.
 * **Approval updates ride the existing SSE stream**, with polling kept as a slow
   backstop. Events say "something changed, ask again" — they carry no
   authorization meaning. The HITL event types are now in the live trace, which
@@ -286,8 +559,10 @@ Model: [HITL_SECURITY_MODEL.md](HITL_SECURITY_MODEL.md).
 
 ### Phase 5.5 — known gaps
 
-* The console token is not protected from XSS; only a server-side session would
-  fix that, and that is Phase 9.
+* The console token is not protected from XSS; only a server-side session
+  would fix that. It was expected to come with a Session Authority phase that
+  was never built -- Phase 9 became final integration instead -- so this gap
+  is open and unplanned rather than deferred.
 * SAML federation is not demonstrated — no second real IdP is available on this
   host, and stubbing it would be a lie.
 * `MACHINE_ADMIN` is the machine principal class, not a Keycloak realm role.
@@ -469,9 +744,17 @@ Verified against the running system:
 ## Phase 2 — known gaps
 
 - Presentations are **replayable**: the challenge is checked but not recorded
-  as used. Single-use nonces need cross-process state — Phase 9. Audience
-  binding (above) narrows a replay to one audience; it does not eliminate it.
-  This is a hard prerequisite for any future human-approval artifact.
+  as used. Audience binding (above) narrows a replay to one audience; it does
+  not eliminate it.
+  **STILL OPEN as of Phase 9, and now unplanned.** It was expected to be
+  closed by a Session Authority phase that was never built. Re-verified on
+  2026-11-03: no challenge is consumed anywhere, and
+  `app/credentials/presentation.py` still says so in its own docstring.
+  Mitigating context, which is why it is MEDIUM and not HIGH: every path that
+  actually carries authority built its own replay ledger instead --
+  control-plane proofs, ANS registration, A2A envelopes and MCP invocations
+  each have one. The `/credentials/present` path is a demonstration surface,
+  not an authorization input.
 - Issuance and revocation are **unauthenticated**, like everything else before
   Phase 4.
 - Required claims per credential type are a Python constant, not a published
@@ -559,7 +842,11 @@ Named here so nothing in the UI or the docs implies otherwise:
   and the IAM plane verifies, authorizes and executes it.
 - **No tools and no banking data.** Every agent's tool registry is empty.
   Phases 5 and 8.
-- **No sessions.** Redis runs but nothing writes to it. Phase 9.
+- **No sessions.** Redis runs but nothing writes to it.
+  **STILL TRUE as of Phase 9, and now unplanned.** Re-verified 2026-11-03:
+  `redis` is referenced only in `config.py`, yet docker-compose starts it AND
+  `iam-api` lists it as a healthy-start dependency. It is an unused service
+  that can block startup -- see PHASE_9_RELEASE.md.
 - **No anomaly detection, no trust score, no kill switch.** Phases 10 and 11.
 - **No loan workflow, topology view or SOC console.** Phase 12. The frontend
   today covers credentials, agents and the live trace only.

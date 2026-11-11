@@ -114,7 +114,7 @@ class TestSecurityMatrix:
 
     # 8 -- audience binding (the Phase 2 S-2 protection, preserved)
     async def test_08_wrong_domain_is_rejected_by_the_presentation_verifier(
-        self, session, keystore, issuers, issued_credential, risk_agent
+        self, fresh_challenge, session, keystore, issuers, issued_credential, risk_agent
     ):
         """Phase 4 did not silently remove the Phase 2 audience protection."""
         from app.credentials.presenter import (
@@ -126,13 +126,13 @@ class TestSecurityMatrix:
         presenter = CredentialPresenter(session, keystore)
         verifier = PresentationVerifier(session, keystore)
         document = await presenter.present(
-            holder_did=risk_agent.did, challenge="n1", domain="loan-service",
+            holder_did=risk_agent.did, challenge=fresh_challenge, domain="loan-service",
         )
-        good = await verifier.verify(document, expected_challenge="n1",
+        good = await verifier.verify(document, expected_challenge=fresh_challenge,
                                      expected_domain="loan-service")
         assert good.valid is True
 
-        relayed = await verifier.verify(document, expected_challenge="n1",
+        relayed = await verifier.verify(document, expected_challenge=fresh_challenge,
                                         expected_domain="payments-service")
         assert relayed.valid is False
         assert relayed.reason == PresentationReason.DOMAIN_MISMATCH

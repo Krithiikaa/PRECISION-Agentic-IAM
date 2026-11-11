@@ -42,7 +42,18 @@
     "name, and OPA compiles the whole set on every PUT, so an unloaded",
     "dependency takes every gate down at once. Phase 7 introduces ZERO new",
     "cross-module names, and `decision.rego` and `security/sensitive.rego` are",
-    "untouched."
+    "untouched.",
+    "",
+    "Phase 8 adds `mcp-invocation`. It lives in the DATA plane",
+    "(agentic_iam.authz) because an MCP tools/call asks the ordinary",
+    "authorization question about an ordinary action -- the transport does not",
+    "change what is being decided. It contributes DENY rules ONLY, and that is",
+    "the central decision of the phase: MCP carries actions that other modules",
+    "already authorize, so an `allow` here would be a SECOND way to permit",
+    "something that already had one, and under deny-overrides a second allow is",
+    "a widening. The channel may narrow what is reachable; it may never widen",
+    "it. Phase 8 introduces ZERO new cross-module names, and `decision.rego`",
+    "and `security/sensitive.rego` are untouched."
   ],
   "policies": [
     {
@@ -220,6 +231,17 @@
       "scope": "any request carrying an A2A transaction envelope",
       "owner": "platform-security",
       "status": "ACTIVE"
+    },
+    {
+      "policy_id": "mcp-invocation",
+      "version": "v1",
+      "module_id": "agentic_iam/mcp/invocation",
+      "source": "mcp/invocation.rego",
+      "description": "MCP transport authorization: deny an invocation whose session is not bound to the authenticated agent, whose token is absent, whose arguments did not validate, whose action is not eligible to be carried over MCP, or whose purpose or resource no valid credential attests. Contributes no ALLOW: the action's own policy still decides.",
+      "purpose": "Ensure a valid OAuth token is an INPUT to authorization and never a substitute for one, and that reaching an action over a remote transport is never easier than reaching it directly.",
+      "scope": "any request carrying an MCP invocation",
+      "owner": "platform-security",
+      "status": "ACTIVE"
     }
   ],
   "data": [
@@ -255,6 +277,17 @@
       "owner": "platform-security",
       "status": "ACTIVE",
       "fails_closed": "a2a/transaction.rego denies with A2A_POLICY_UNCONFIGURED when this document is not loaded. An absent threshold is never 'no limit'."
+    },
+    {
+      "data_id": "mcp-policy",
+      "version": "v1",
+      "path": "agentic_iam/config/mcp",
+      "source": "data/mcp_policy.json",
+      "description": "Which actions may be carried over the MCP transport at all. Read by mcp/invocation.rego.",
+      "purpose": "Keep the RISK decision 'may this be invoked remotely?' separate from the RULES that decide whether a particular agent may invoke it.",
+      "owner": "platform-security",
+      "status": "ACTIVE",
+      "fails_closed": "mcp/invocation.rego denies with MCP_POLICY_UNCONFIGURED when this document is not loaded. An absent eligibility list is never 'everything'."
     }
   ]
 }

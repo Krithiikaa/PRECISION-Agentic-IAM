@@ -210,8 +210,48 @@ class EventType:
     A2A_FAILED = "A2A_FAILED"
     A2A_RESPONSE = "A2A_RESPONSE"
 
+    # --- Phase 8: MCP security (implemented) ---
+    # An MCP call is an INSTRUCTION over a transport, not a permission:
+    # authenticating the caller and binding the session establish who is
+    # asking, and the PDP is then asked exactly as it would be for the same
+    # action on any other channel. These events exist so that whole arc --
+    # session opened, tools listed, call received, decided, escalated,
+    # executed or refused -- is reconstructible from the trail by
+    # `request_id = mcp-{digest}` and `session_id`.
+    #
+    # DELIBERATELY ABSENT: MCP-specific authorization events. The PDP already
+    # emits AUTHORIZATION_REQUESTED, PIP_CONTEXT_COLLECTED, OPA_DECISION,
+    # PDP_EVALUATION and POLICY_ALLOW/POLICY_DENY, all carrying that same
+    # request_id. Duplicating them would create two records of one decision
+    # that can disagree.
+    MCP_REQUEST = "MCP_REQUEST"
+    MCP_SESSION_CREATED = "MCP_SESSION_CREATED"
+    # Authentication and authorization are separate events for the reason
+    # Phase 4.5 established: "we could not tell who you are" and "we know
+    # exactly who you are and you may not do that" are different incidents.
+    MCP_AUTHENTICATED = "MCP_AUTHENTICATED"
+    MCP_AUTHENTICATION_FAILED = "MCP_AUTHENTICATION_FAILED"
+    # A session id presented by an agent it was not issued to. Its own event
+    # rather than a generic rejection, because it is an attempt to borrow
+    # another agent's session and not a client bug.
+    MCP_SESSION_BINDING_VIOLATION = "MCP_SESSION_BINDING_VIOLATION"
+    # A request id reused within a session to carry different content. Its
+    # own event for the reason A2A_REPLAY_BLOCKED is.
+    MCP_REPLAY_BLOCKED = "MCP_REPLAY_BLOCKED"
+    # An Origin this server does not accept. DNS-rebinding defence, and an
+    # incident rather than a validation error.
+    MCP_ORIGIN_REJECTED = "MCP_ORIGIN_REJECTED"
+    MCP_PROTOCOL_ERROR = "MCP_PROTOCOL_ERROR"
+    MCP_TOOLS_LISTED = "MCP_TOOLS_LISTED"
+    MCP_INVOCATION_EXECUTED = "MCP_INVOCATION_EXECUTED"
+    MCP_INVOCATION_DENIED = "MCP_INVOCATION_DENIED"
+    # Was declared under Phase 11 while no transport existed to terminate a
+    # session. Phase 8 builds that transport and emits it: HTTP DELETE, idle
+    # expiry and agent revocation all end a session, and an auditor needs to
+    # know which.
+    MCP_SESSION_TERMINATED = "MCP_SESSION_TERMINATED"
+
     # --- Declared for later phases; NOT emitted yet ---
-    MCP_REQUEST = "MCP_REQUEST"                   # Phase 8
     # NOTE: TOOL_EXECUTED has been emitted by the AEM since Phase 4. It was
     # listed under Phase 8 here by a comment that was never corrected when the
     # enforcement boundary landed; the name and value are unchanged.
@@ -222,7 +262,6 @@ class EventType:
     ANOMALY_DETECTED = "ANOMALY_DETECTED"         # Phase 10
     TRUST_UPDATED = "TRUST_UPDATED"               # Phase 10
     A2A_SESSION_TERMINATED = "A2A_SESSION_TERMINATED"   # Phase 11
-    MCP_SESSION_TERMINATED = "MCP_SESSION_TERMINATED"   # Phase 11
 
 
 @dataclass(frozen=True)

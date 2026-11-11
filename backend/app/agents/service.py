@@ -384,8 +384,20 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
 
         # Coordinator agents get a planner that discovers through the ANS.
         if definition.agent_type.value == "COORDINATOR":
+            def _sign_read(path: str) -> dict:
+                """A control-plane proof for a GET, signed with this
+                agent's own key. The signed path excludes any query
+                string, because the server signs `request.url.path`."""
+                headers = control_plane_headers(
+                    Signer(keystore), principal_did=did, kid=handle.kid,
+                    method="GET", path=path.split("?", 1)[0],
+                    body=canonical_body(None),
+                )
+                return headers
+
             state["coordinator"] = Coordinator(
-                ans=ans, llm=llm, iam_client=iam, did=did
+                ans=ans, llm=llm, iam_client=iam, did=did,
+                sign_read=_sign_read,
             )
         log.info(
             "agent_started", did=did, port=config.port, registered=state["registered"],

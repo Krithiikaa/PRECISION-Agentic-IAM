@@ -31,14 +31,21 @@ PASSED = 0
 FAILED = 0
 
 
-def call(method, url, body=None):
+def call(method, url, body=None, principal=None):
     # PHASE 5 / S-7: credential issuance and revocation are authorized
     # operations now. The gate signs as the machine identity administrator --
     # the supported path for automation, which has no browser.
     path = url[url.index("/api/"):] if "/api/" in url else url
-    if method == "POST" and (path.endswith("/credentials/issue")
-                             or path.endswith("/revoke")
-                             or path.endswith("/api/v1/agents")):
+    # PHASE 10. Sensitive READS are authorized now too, so a caller may name
+    # the principal to read as. The signed path EXCLUDES the query string --
+    # the server signs `request.url.path` -- and signing it would produce a
+    # 401 that looks exactly like a missing role.
+    if principal is not None:
+        data, headers = cp_sign.signed(
+            principal, method, path.split("?", 1)[0], body)
+    elif method == "POST" and (path.endswith("/credentials/issue")
+                               or path.endswith("/revoke")
+                               or path.endswith("/api/v1/agents")):
         data, headers = cp_sign.signed(cp_sign.IDENTITY_ADMIN, method, path, body)
     else:
         data = json.dumps(body).encode() if body is not None else None
@@ -100,7 +107,7 @@ print("  MANDATORY END-TO-END TEST (spec section 37)")
 print("=" * 74)
 
 print("\n  STEP 1  Phase 1 agent identity is reused, not re-created")
-_, agent = call("GET", f"{API}/api/v1/agents/did/{RISK}")
+_, agent = call("GET", f"{API}/api/v1/agents/did/{RISK}", principal=cp_sign.IDENTITY_ADMIN)
 print(f"          DID        {agent['did']}")
 print(f"          Public key {agent['active_key']['public_key_multibase']}")
 print(f"          Custody    {agent['active_key']['keystore_backend']} (agent holds its own key)")
@@ -212,7 +219,7 @@ check("reason is MISSING_REQUIRED_CLAIM", report["reason"], "MISSING_REQUIRED_CL
 print("\n" + "=" * 74)
 print("  AUDIT TRAIL (spec section 42)")
 print("=" * 74)
-_, events = call("GET", f"{API}/api/v1/audit?agent_did={RISK}&limit=200")
+_, events = call("GET", f"{API}/api/v1/audit?agent_did={RISK}&limit=200", principal=cp_sign.IDENTITY_ADMIN)
 seen = {}
 for event in events:
     seen[event["event_type"]] = seen.get(event["event_type"], 0) + 1

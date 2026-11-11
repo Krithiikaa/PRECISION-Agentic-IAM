@@ -34,6 +34,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+from app.ratelimit.middleware import RateLimitMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.deps import get_keystore, get_llm_provider
@@ -50,6 +52,7 @@ from app.api.routes import (
     identity,
     jit,
     loans,
+    mcp,
 )
 from app.core.config import DEV_MASTER_KEY, get_settings
 from app.core.errors import ConflictError, IdentityError, KeyStoreError, NotFoundError
@@ -226,13 +229,33 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    # --- Phase 10: CORS from configuration, not from a literal -----------
+    # The origins, methods and headers were hardcoded to two localhost
+    # values with `allow_methods=["*"]` and `allow_headers=["*"]`. That
+    # fails SAFE (a real console simply would not load) but it cannot be
+    # deployed, and the wildcards were wider than anything needed.
+    #
+    # CORS IS NOT AUTHORIZATION, and nothing here is relied on as though it
+    # were. It restricts which BROWSER ORIGINS may read a response; it does
+    # nothing about a direct HTTP call, which is why every route above is
+    # guarded independently. Narrowing it reduces what a hostile page can
+    # do with a signed-in user's session -- no more than that.
+    settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://localhost:3000"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=settings.cors_origins,
+        allow_credentials=settings.cors_allow_credentials,
+        allow_methods=settings.cors_methods,
+        allow_headers=settings.cors_headers,
+        max_age=settings.cors_max_age_seconds,
     )
+
+    # --- Phase 10: rate limiting -----------------------------------------
+    # Added LAST so it runs FIRST. Starlette applies middleware in reverse
+    # registration order, and the limit has to be counted before any work is
+    # done -- a limiter that runs after authentication has already paid for
+    # the JWKS fetch it was supposed to prevent.
+    app.add_middleware(RateLimitMiddleware, settings=settings)
 
     install_error_handlers(app)
 
@@ -247,6 +270,10 @@ def create_app() -> FastAPI:
     app.include_router(loans.router)
     app.include_router(jit.router)
     app.include_router(a2a.router)
+    # Phase 8. NOT under /api/v1: the MCP endpoint's URL is its OAuth
+    # resource identifier (RFC 8707), so it is a fixed, documented path
+    # rather than one that moves with API versioning.
+    app.include_router(mcp.router)
     return app
 
 

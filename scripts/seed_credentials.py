@@ -107,9 +107,17 @@ def call(method: str, path: str, body=None):
     # unauthenticated, a caller could mint itself a capability credential and
     # the PDP would faithfully ALLOW on it. This script signs as the machine
     # identity administrator.
-    if method == "POST" and (path.endswith("/credentials/issue")
-                             or path.endswith("/revoke")):
-        data, headers = cp_sign.signed(cp_sign.IDENTITY_ADMIN, method, path, body)
+    # PHASE 10. Reading the credential inventory is now an authorized
+    # operation too (`credential_read`), so the inventory calls below sign
+    # as well. The signed path must EXCLUDE the query string: the server
+    # signs `request.url.path`, so signing "/x?subject=y" produces a proof
+    # it cannot reproduce -- a 401 that looks exactly like a missing role.
+    signed_read = method == "GET" and path.startswith("/api/v1/credentials")
+    if (method == "POST" and (path.endswith("/credentials/issue")
+                              or path.endswith("/revoke"))) or signed_read:
+        data, headers = cp_sign.signed(
+            cp_sign.IDENTITY_ADMIN, method, path.split("?", 1)[0], body,
+        )
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"content-type": "application/json"}

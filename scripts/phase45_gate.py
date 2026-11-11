@@ -50,7 +50,7 @@ def call(method, url, body=None, principal=None, timeout=30.0, base=None):
     """Issue a request, signing it as `principal` when one is given."""
     if principal is not None:
         path = url[len(base or API):]
-        data, headers = cp_sign.signed(principal, method, path, body)
+        data, headers = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -103,7 +103,7 @@ if status == 409:
     # A previous run already made it. Re-read the identity so the gate is
     # rerunnable: a conflict body carries no id, and silently carrying None
     # through turned a real refusal into a 422 that looked like a policy bug.
-    _, created = call("GET", f"{API}/api/v1/agents/did/{PROBE_DID}")
+    _, created = call("GET", f"{API}/api/v1/agents/did/{PROBE_DID}", principal=cp_sign.IDENTITY_ADMIN)
 PROBE_ID = created.get("id")
 if not PROBE_ID:
     print(f"      Could not resolve {PROBE_DID}: {created}")
@@ -156,7 +156,7 @@ print("\n  STEP 2  None of that changed anything")
 _, agents = call("GET", f"{ANS}/api/v1/ans/agents", base=ANS)
 victim = next((a for a in agents if a["did"] == VICTIM), None)
 check("the victim is still ACTIVE", victim and victim["status"], "ACTIVE")
-_, policies = call("GET", f"{API}/api/v1/policies")
+_, policies = call("GET", f"{API}/api/v1/policies", principal=cp_sign.POLICY_ADMIN)
 loaded = {p["policy_id"]: p for p in policies["policies"]}
 check("loan-credit-read is still in the engine",
       loaded["loan-credit-read"]["in_engine"], True)
@@ -320,7 +320,7 @@ print("      OPA's own API. In a deployment the port is not published at all.")
 
 # --- 10. audit ---------------------------------------------------------------
 print("\n  STEP 10  Acceptances and refusals are both on the audit trail")
-_, events = call("GET", f"{API}/api/v1/audit?limit=400")
+_, events = call("GET", f"{API}/api/v1/audit?limit=400", principal=cp_sign.IDENTITY_ADMIN)
 types = [e["event_type"] for e in events]
 for expected in ("CONTROL_PLANE_AUTHENTICATED", "CONTROL_PLANE_AUTHORIZED",
                  "CONTROL_PLANE_REJECTED", "CONTROL_PLANE_DENIED",
@@ -339,7 +339,7 @@ print("\n  STEP 11  MEASURED control-plane overhead (20 real requests each)")
 unsigned, signed_calls = [], []
 for _ in range(20):
     started = time.perf_counter()
-    call("GET", f"{API}/api/v1/policies")
+    call("GET", f"{API}/api/v1/policies", principal=cp_sign.POLICY_ADMIN)
     unsigned.append((time.perf_counter() - started) * 1000)
 for _ in range(20):
     started = time.perf_counter()
@@ -348,7 +348,7 @@ for _ in range(20):
     signed_calls.append((time.perf_counter() - started) * 1000)
 
 auth_ms, authz_ms = [], []
-_, events = call("GET", f"{API}/api/v1/audit?limit=200")
+_, events = call("GET", f"{API}/api/v1/audit?limit=200", principal=cp_sign.IDENTITY_ADMIN)
 for event in events:
     if event["event_type"] == "CONTROL_PLANE_AUTHORIZED":
         auth_ms.append(event["metadata"].get("authentication_ms") or 0)

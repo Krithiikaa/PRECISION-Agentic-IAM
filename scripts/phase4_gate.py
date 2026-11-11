@@ -50,8 +50,12 @@ def call(method: str, url: str, body: dict | None = None, timeout: float = 30.0,
     control-plane proof binds sha256(body), so re-encoding would invalidate it.
     """
     if principal is not None:
-        path = url[len(API):]
-        data, headers = cp_sign.signed(principal, method, path, body)
+        # THE SIGNED PATH MUST NOT CARRY THE QUERY STRING: the server signs
+        # `request.url.path`, which excludes it. Signing "/x?limit=5" makes a
+        # proof the server cannot reproduce -- a 401 that looks exactly like
+        # a missing role and sends the reader hunting through the policy set.
+        path = url[len(API):].split("?", 1)[0]
+        data, headers = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -124,7 +128,7 @@ try:
 except urllib.error.URLError as exc:
     print(f"      OPA not directly reachable ({exc}); relying on the API's view")
 
-_, policies = call("GET", f"{API}/api/v1/policies")
+_, policies = call("GET", f"{API}/api/v1/policies", principal=cp_sign.POLICY_ADMIN)
 print(f"\n      Policy lifecycle ({len(policies['policies'])} policies):")
 for policy in policies["policies"]:
     print(f"        {policy['policy_id']:<24s} {policy['version']:<4s} "
@@ -133,7 +137,7 @@ for policy in policies["policies"]:
 
 # --- 1. subject ------------------------------------------------------------
 print("\n  STEP 1  A real Phase 1 identity holding a real Phase 2 credential")
-_, agents = call("GET", f"{API}/api/v1/agents")
+_, agents = call("GET", f"{API}/api/v1/agents", principal=cp_sign.IDENTITY_ADMIN)
 risk = next((a for a in agents if a["slug"] == "risk-001"), None)
 if risk is None:
     print("      No risk-001 agent. Run scripts/run_local.sh first.")
@@ -141,7 +145,7 @@ if risk is None:
 did = risk["did"]
 print(f"      Agent {did}  status={risk['status']}")
 
-_, held = call("GET", f"{API}/api/v1/credentials?subject={did}")
+_, held = call("GET", f"{API}/api/v1/credentials?subject={did}", principal=cp_sign.IDENTITY_ADMIN)
 active = [c for c in held if c["status"] == "ACTIVE"
           and c["credential_type"] == "AgentCapabilityCredential"]
 if not active:
@@ -219,7 +223,7 @@ print("      -> the tool was never called; no payroll data left the boundary")
 # --- 9. audit --------------------------------------------------------------
 print("\n  STEP 9  Every decision is audited and correlated")
 request_id = allowed["decision"]["request_id"]
-_, events = call("GET", f"{API}/api/v1/audit?limit=300")
+_, events = call("GET", f"{API}/api/v1/audit?limit=300", principal=cp_sign.IDENTITY_ADMIN)
 correlated = [e for e in events if e.get("request_id") == request_id]
 types = [e["event_type"] for e in correlated]
 print(f"      request_id={request_id} -> {len(correlated)} correlated events")

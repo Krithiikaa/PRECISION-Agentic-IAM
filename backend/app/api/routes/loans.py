@@ -39,7 +39,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.api.deps import SessionDep
 from app.audit.service import AuditService
 from app.controlplane.authenticator import ControlPlanePrincipalView
-from app.controlplane.guard import ControlPlaneGuard, path_param
+from app.controlplane.guard import ControlPlaneGuard, fixed, path_param
 from app.core.errors import NotFoundError
 from app.core.logging import get_logger
 from app.enforcement.resources import (
@@ -63,13 +63,15 @@ class AmendAmountIn(BaseModel):
     reason: str = Field(default="amended upstream", max_length=500)
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(
+    ControlPlaneGuard("loan_read", target=fixed("loan_registry")))])
 async def list_loans() -> list[dict[str, Any]]:
     """The demonstration applications. Synthetic, and labelled as such."""
     return [get_loan_application(id) for id in known_loan_applications()]
 
 
-@router.get("/{application_id}")
+@router.get("/{application_id}", dependencies=[Depends(
+    ControlPlaneGuard("loan_read", target=path_param("application_id")))])
 async def read_loan(application_id: str) -> dict[str, Any]:
     try:
         return get_loan_application(application_id)

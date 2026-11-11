@@ -196,5 +196,30 @@
         "PAYMENT_OFFICER"
       ]
     }
+  ],
+  "clientScopes": [
+    {
+      "name": "mcp-invoke",
+      "description": "Phase 8. Adds the agentic-iam-mcp audience to an access token. Assigned to AGENT clients only -- the human console must never receive it, because a token valid at both the console API and the MCP endpoint is exactly the cross-service reuse the MCP authorization spec forbids.",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "agentic-iam-mcp-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "agentic-iam-mcp",
+            "id.token.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
   ]
 }

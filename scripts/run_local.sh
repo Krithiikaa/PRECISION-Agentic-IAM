@@ -91,5 +91,17 @@ done
 echo
 echo "IAM API      http://localhost:${API_PORT:-8000}/docs"
 echo "ANS          http://localhost:${ANS_PORT:-8100}/docs"
+echo "MCP          http://localhost:${API_PORT:-8000}/mcp  (OAuth 2.1)"
 echo "Stop with    scripts/stop_local.sh"
+echo
+# NOT run automatically, deliberately. Seeding ISSUES credentials rather than
+# replacing them, so doing it on every start would accumulate duplicates; and
+# provisioning talks to Keycloak, which should not be a precondition for the
+# API coming up. They are printed because without them an agent holds no
+# credential (every call denies) and MCP has no OAuth client (every call is
+# 401) -- both of which look like bugs rather than missing setup.
+echo "Next, if you want agents to be able to DO anything:"
+echo "  cd backend"
+echo "  python3 ../scripts/seed_credentials.py       # capability credentials (1h TTL)"
+echo "  python3 ../scripts/provision_mcp_clients.py  # Phase 8 OAuth clients"
 exit $FAILED

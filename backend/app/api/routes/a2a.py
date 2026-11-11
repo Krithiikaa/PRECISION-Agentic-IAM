@@ -138,7 +138,8 @@ async def submit_transaction(
     return result.to_dict()
 
 
-@router.get("/transactions")
+@router.get("/transactions", dependencies=[Depends(
+    ControlPlaneGuard("grant_read", target=fixed("a2a_ledger")))])
 async def list_transactions(
     session: SessionDep,
     sender_did: str | None = Query(default=None),
@@ -162,7 +163,8 @@ async def list_transactions(
     return [r.to_dict() for r in records]
 
 
-@router.get("/instructions")
+@router.get("/instructions", dependencies=[Depends(
+    ControlPlaneGuard("grant_read", target=fixed("payment_instructions")))])
 async def list_instructions() -> list[dict[str, Any]]:
     """The demonstration payment instructions. Synthetic, and labelled so."""
     return [get_payment_instruction(i) for i in known_payment_instructions()]
@@ -200,7 +202,8 @@ async def a2a_health(session: SessionDep, settings: SettingsDep) -> dict[str, An
     }
 
 
-@router.get("/transactions/{transaction_id}")
+@router.get("/transactions/{transaction_id}", dependencies=[Depends(
+    ControlPlaneGuard("grant_read", target=path_param("transaction_id")))])
 async def read_transaction(
     transaction_id: str, session: SessionDep,
 ) -> dict[str, Any]:

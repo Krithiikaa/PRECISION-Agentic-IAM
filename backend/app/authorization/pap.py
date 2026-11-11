@@ -281,9 +281,13 @@ class PolicyAdministrationPoint:
         definitions = self.read_definitions()
         loaded: list[str] = []
         skipped: list[str] = []
+        # An operator's deactivation outranks the manifest. Without this, a
+        # reload -- including the one `reconcile()` performs every 15
+        # seconds -- would resurrect a policy somebody switched off.
+        deactivated = await self._operator_deactivated()
 
         for definition in definitions:
-            if definition.status != "ACTIVE":
+            if definition.status != "ACTIVE" or definition.policy_id in deactivated:
                 skipped.append(definition.policy_id)
                 await self._upsert(definition, PolicyStatus.INACTIVE, loaded_at=None)
                 continue
@@ -351,6 +355,38 @@ class PolicyAdministrationPoint:
         )
         return list(result.scalars().all())
 
+    async def _operator_deactivated(self) -> set[str]:
+        """Policy ids an operator has explicitly deactivated via the API.
+
+        THE MANIFEST IS NOT THE LIVE STATE, and conflating the two was a real
+        defect. `policies/manifest.json` declares what a policy IS -- its
+        owner, its purpose, the version that ships. Every entry in it is
+        `"status": "ACTIVE"`, because the file describes the shipped set, not
+        the running one. `POST /api/v1/policies/{id}/deactivate` records the
+        running state in the DATABASE.
+
+        Before this existed, `reconcile()` and `load_all()` both read only the
+        manifest. So a deactivated policy was seen as "missing from OPA",
+        treated as an engine fault, and pushed back in -- silently, within the
+        15-second reconciler interval, with a log line that read like
+        recovery. An operator disabling a policy to stop an incident would
+        have watched it come back.
+
+        A SESSION IS REQUIRED to ask the question. `reconcile()` is also
+        reachable from a session-less construction in a few scripts; those
+        callers get an empty set, which restores the previous (manifest-only)
+        behaviour rather than crashing -- correct for a bootstrap path that
+        has no database to consult yet.
+        """
+        if self.session is None:
+            return set()
+        result = await self.session.execute(
+            select(PolicyRecord.policy_id).where(
+                PolicyRecord.status == PolicyStatus.INACTIVE
+            )
+        )
+        return set(result.scalars().all())
+
     async def activate(self, policy_id: str) -> PolicyRecord:
         definition = self._definition(policy_id)
         await self.opa.put_policy(definition.module_id, definition.source)
@@ -414,9 +450,13 @@ class PolicyAdministrationPoint:
         except OPAUnavailableError as exc:
             return {"reconciled": False, "reason": f"OPA unreachable: {exc}"}
 
+        deactivated = await self._operator_deactivated()
         expected = {
-            d.module_id for d in self.read_definitions() if d.status == "ACTIVE"
+            d.module_id for d in self.read_definitions()
+            if d.status == "ACTIVE" and d.policy_id not in deactivated
         }
+        # A module an operator deactivated is SUPPOSED to be absent from the
+        # engine. Counting it as "missing" is what made deactivation revert.
         missing = expected - in_engine
 
         # Configuration is held in memory by OPA exactly as policy is, so an

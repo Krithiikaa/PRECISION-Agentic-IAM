@@ -186,7 +186,8 @@ def describe(record, signoffs: list | None = None) -> dict[str, Any]:
 
 
 # --- public: what the browser needs to log in ------------------------------
-@router.get("/config")
+@router.get("/config", dependencies=[Depends(
+    ControlPlaneGuard("approval_read", target=fixed("approval_config")))])
 async def hitl_config(settings: SettingsDep) -> dict[str, Any]:
     """The OIDC parameters the console needs. Public, and carries no secret.
 
@@ -275,7 +276,8 @@ async def whoami(
 
 
 # --- the queue --------------------------------------------------------------
-@router.get("/approvals")
+@router.get("/approvals", dependencies=[Depends(
+    ControlPlaneGuard("approval_read", target=fixed("approval_queue")))])
 async def list_approvals(
     session: SessionDep,
     status: str | None = None,
@@ -484,7 +486,8 @@ async def rotate_authority_key(
 
 
 # --- human principals -------------------------------------------------------
-@router.get("/humans")
+@router.get("/humans", dependencies=[Depends(
+    ControlPlaneGuard("approval_read", target=fixed("human_registry")))])
 async def list_humans(session: SessionDep) -> list[dict[str, Any]]:
     """Everyone who has authenticated. The MINIMUM this system stores.
 

@@ -34,6 +34,11 @@ class ControlPlaneClass(str, enum.Enum):
 
     PUBLIC_READ = "PUBLIC_READ"
     AUTHENTICATED_READ = "AUTHENTICATED_READ"
+    # Phase 10. A read that a ROLE must hold, not merely an identity. The
+    # distinction matters: AUTHENTICATED_READ means "prove who you are and
+    # the data is yours", which for the audit trail or a loan file would have
+    # handed everything to any principal that could authenticate at all.
+    AUTHORIZED_READ = "AUTHORIZED_READ"
     AUTHENTICATED_MUTATION = "AUTHENTICATED_MUTATION"
     AUTHORIZED_MUTATION = "AUTHORIZED_MUTATION"
     HIGH_RISK_ADMINISTRATION = "HIGH_RISK_ADMINISTRATION"

@@ -17,12 +17,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Query
+from fastapi import Depends, APIRouter, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
 from app.db.database import session_scope
 from app.db.models.audit import AuditEvent
+from app.controlplane.guard import ControlPlaneGuard, fixed
 
 router = APIRouter(prefix="/api/v1/events", tags=["events"])
 
@@ -63,7 +64,8 @@ async def _after(cursor: int, limit: int = 200) -> list[AuditEvent]:
         return list(result.scalars().all())
 
 
-@router.get("/stream")
+@router.get("/stream", dependencies=[Depends(
+    ControlPlaneGuard("audit_read", target=fixed("event_stream")))])
 async def stream(
     replay: int = Query(default=0, ge=0, le=500,
                         description="Replay this many recent events before going live."),

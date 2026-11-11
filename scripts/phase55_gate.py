@@ -113,7 +113,7 @@ def call(method, path, body=None, *, principal=None, human=None, agent=False,
     if agent:
         data, headers = agent_headers(method, path, body)
     elif principal:
-        data, headers = cp_sign.signed(principal, method, path, body)
+        data, headers = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -215,7 +215,7 @@ check("the two loan officers are DIFFERENT people",
 
 # --- 1. the amount is policy configuration ----------------------------------
 print("\n  STEP 1  The thresholds are policy CONFIGURATION, loaded into OPA")
-status, policy_health = call("GET", "/api/v1/policies")
+status, policy_health = call("GET", "/api/v1/policies", principal=cp_sign.POLICY_ADMIN)
 loaded = {p["policy_id"] for p in policy_health.get("policies", [])}
 check("loan-amount policy is loaded", "loan-amount" in loaded, True)
 data_rows = {d["data_id"]: d for d in policy_health.get("data", [])}
@@ -486,7 +486,7 @@ check("exactly one key is ACTIVE",
 #  AUDIT
 # ===========================================================================
 print("\n  AUDIT  The dual-control cycle, correlated by one request id")
-status, events = call("GET", f"/api/v1/audit?limit=800")
+status, events = call("GET", f"/api/v1/audit?limit=800", principal=cp_sign.IDENTITY_ADMIN)
 types = {e["event_type"] for e in events}
 for required in ("APPROVAL_REQUESTED", "POLICY_ESCALATED", "APPROVAL_VIEWED",
                  "APPROVAL_SIGNOFF_RECORDED", "APPROVAL_APPROVED",

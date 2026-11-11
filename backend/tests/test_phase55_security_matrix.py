@@ -618,12 +618,12 @@ class TestLoanAmendment:
         assert record.binding["amount_inr"] == 2_500_000
 
     async def test_the_amendment_is_audited_with_both_figures(
-        self, client, cp_post, control_plane, opa_ready
+        self, cp_get, client, cp_post, control_plane, opa_ready
     ):
         await cp_post(f"/api/v1/loans/{SINGLE}/amount",
                       "did:poc:administrator:core-banking",
                       {"amount_inr": 25_000_000, "reason": "restated upstream"})
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         amended = [e for e in events if e["event_type"] == "LOAN_AMOUNT_AMENDED"]
         assert len(amended) == 1
         assert amended[0]["metadata"]["amount_before"] == 2_500_000
@@ -688,8 +688,8 @@ class TestSAMLStatus:
         for library in ("python3-saml", "pysaml2", "python-saml", "onelogin"):
             assert library not in requirements
 
-    async def test_the_configured_provider_is_oidc_and_says_so(self, client):
-        config = (await client.get("/api/v1/hitl/config")).json()
+    async def test_the_configured_provider_is_oidc_and_says_so(self, cp_get, client):
+        config = (await cp_get("/api/v1/hitl/config")).json()
         assert config["provider"] == "keycloak"
         assert config["flow"] == "authorization_code+pkce"
 
@@ -811,7 +811,7 @@ class TestStateMachine:
 # ===========================================================================
 class TestAudit:
     async def test_a_dual_control_cycle_is_fully_recorded_and_correlated(
-        self, client, attempt, cp_post, human_post, loan_officer_token,
+        self, cp_get, client, attempt, cp_post, human_post, loan_officer_token,
         second_loan_officer_token, loan_agent
     ):
         _, approval_id, request_id = await attempt(DUAL)
@@ -826,7 +826,7 @@ class TestAudit:
         await cp_post("/api/v1/enforce", GATEWAY, enforce_body(
             loan_agent["did"], DUAL, request_id=request_id))
 
-        events = (await client.get("/api/v1/audit?limit=500")).json()
+        events = (await cp_get("/api/v1/audit?limit=500")).json()
         types = {e["event_type"] for e in events}
         for required in (
             "APPROVAL_REQUESTED", "POLICY_ESCALATED", "APPROVAL_VIEWED",
@@ -853,7 +853,7 @@ class TestAudit:
         assert len(correlated) >= 8
 
     async def test_the_duplicate_approver_attempt_is_recorded_as_its_own_event(
-        self, client, attempt, human_post, loan_officer_token
+        self, cp_get, client, attempt, human_post, loan_officer_token
     ):
         _, approval_id, _ = await attempt(DUAL)
         await human_post(f"/api/v1/hitl/approvals/{approval_id}/decide",
@@ -861,18 +861,18 @@ class TestAudit:
         await human_post(f"/api/v1/hitl/approvals/{approval_id}/decide",
                          loan_officer_token, {"decision": "APPROVED"})
 
-        events = (await client.get("/api/v1/audit?limit=500")).json()
+        events = (await cp_get("/api/v1/audit?limit=500")).json()
         denied = [e for e in events
                   if e["event_type"] == "CONTROL_PLANE_DENIED"
                   and e["reason"] == "APPROVER_ALREADY_SIGNED"]
         assert denied, "the two-person violation must be visible in the trail"
 
     async def test_no_secret_appears_in_the_audit_trail(
-        self, client, attempt, human_post, loan_officer_token
+        self, cp_get, client, attempt, human_post, loan_officer_token
     ):
         _, approval_id, _ = await attempt(SINGLE)
         await human_post(f"/api/v1/hitl/approvals/{approval_id}/decide",
                          loan_officer_token, {"decision": "APPROVED"})
-        raw = (await client.get("/api/v1/audit?limit=500")).text
+        raw = (await cp_get("/api/v1/audit?limit=500")).text
         assert loan_officer_token not in raw
         assert "PRIVATE KEY" not in raw.upper()

@@ -71,6 +71,7 @@ class PolicyDecisionPoint:
     async def decide(
         self, request: AuthorizationRequest, *, record: bool = True,
         a2a: Any = None,
+        mcp: Any = None,
     ) -> AuthorizationDecision:
         """Decide one authorization request.
 
@@ -83,6 +84,11 @@ class PolicyDecisionPoint:
         Nothing about the decision moves because of it: an A2A verdict is one
         more FACT in the input document, and `a2a/transaction.rego` is what
         decides what it means. A valid signature has never been an ALLOW.
+
+        `mcp` (Phase 8) is the same arrangement for the MCP transport: the
+        verdict about an authenticated, session-bound invocation, passed
+        through to policy as one more fact. A valid access token has never
+        been an ALLOW either.
         """
         stages: list[Stage] = []
 
@@ -122,7 +128,7 @@ class PolicyDecisionPoint:
         # --- 1. PIP -------------------------------------------------------
         started = time.perf_counter()
         try:
-            context = await self.pip.collect(request, a2a=a2a)
+            context = await self.pip.collect(request, a2a=a2a, mcp=mcp)
         except Exception as exc:  # noqa: BLE001 - a PIP failure must not open the gate
             stages.append(Stage("pip", False, f"{type(exc).__name__}: {exc}",
                                 (time.perf_counter() - started) * 1000))

@@ -111,7 +111,7 @@ def call(method, path, body=None, *, principal=None, agent=None, slug=None,
     if agent:
         data, headers = agent_headers(method, path, body, agent, slug)
     elif principal:
-        data, headers = cp_sign.signed(principal, method, path, body)
+        data, headers = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -178,12 +178,12 @@ def submit(document, *, as_did=RECEIVER, as_slug=RECEIVER_SLUG):
 
 
 def instruction(instruction_id):
-    return call("GET", f"/api/v1/loans")[1] and call(
+    return call("GET", f"/api/v1/loans", principal=cp_sign.CORE_BANKING)[1] and call(
         "GET", "/api/v1/a2a/instructions")[1]
 
 
 def instruction_state(instruction_id):
-    for record in call("GET", "/api/v1/a2a/instructions")[1]:
+    for record in call("GET", "/api/v1/a2a/instructions", principal=cp_sign.IDENTITY_ADMIN)[1]:
         if record["instruction_id"] == instruction_id:
             return record
     return {}
@@ -245,7 +245,7 @@ check("envelope verification cannot be switched off",
       health.get("verification_required"), True)
 check("the audience is bound", health.get("domain"), "agentic-iam-a2a")
 
-status, policies = call("GET", "/api/v1/policies")
+status, policies = call("GET", "/api/v1/policies", principal=cp_sign.POLICY_ADMIN)
 ids = {p["policy_id"] for p in policies.get("policies", [])}
 check("a2a-transaction is loaded", "a2a-transaction" in ids, True)
 check("every declared module is in the engine",
@@ -255,9 +255,9 @@ check("no policy has drifted from disk",
 data_ids = {d["data_id"] for d in policies.get("data", [])}
 check("a2a-policy configuration is declared", "a2a-policy" in data_ids, True)
 
-status, sender_identity = call("GET", f"/api/v1/agents/did/{SENDER}")
+status, sender_identity = call("GET", f"/api/v1/agents/did/{SENDER}", principal=cp_sign.IDENTITY_ADMIN)
 check("the sender identity is ACTIVE", sender_identity.get("status"), "ACTIVE")
-status, receiver_identity = call("GET", f"/api/v1/agents/did/{RECEIVER}")
+status, receiver_identity = call("GET", f"/api/v1/agents/did/{RECEIVER}", principal=cp_sign.IDENTITY_ADMIN)
 check("the receiver identity is ACTIVE", receiver_identity.get("status"), "ACTIVE")
 
 for identifier, amount in ((AUTONOMOUS, 50_000), (SINGLE, 500_000),
@@ -494,7 +494,7 @@ check("a proof dated before its key existed is refused",
 
 # SUSPEND the sender, then restore it. The status route is keyed by the
 # agent's UUID, not its slug.
-_, sender_record = call("GET", f"/api/v1/agents/did/{SENDER}")
+_, sender_record = call("GET", f"/api/v1/agents/did/{SENDER}", principal=cp_sign.IDENTITY_ADMIN)
 SENDER_ID = sender_record.get("id")
 status, _ = call("POST", f"/api/v1/agents/{SENDER_ID}/status",
                  {"status": "SUSPENDED"}, principal=IDENTITY_ADMIN)
@@ -649,7 +649,7 @@ print("\n 11. KEY SEPARATION")
 # ---------------------------------------------------------------------------
 status, jit_keys = call("GET", "/api/v1/jit/keys")
 status, approval_keys = call("GET", "/api/v1/hitl/authority/keys")
-status, sender_document = call("GET", f"/api/v1/agents/did/{SENDER}/did-document")
+status, sender_document = call("GET", f"/api/v1/agents/did/{SENDER}/did-document", principal=cp_sign.IDENTITY_ADMIN)
 agent_key = (sender_document.get("verificationMethod") or [{}])[0].get(
     "publicKeyMultibase")
 jit_key = next((k["public_key_multibase"] for k in jit_keys.get("keys", [])
@@ -689,7 +689,7 @@ for authority_did, label in (
 # ---------------------------------------------------------------------------
 print("\n 12. AUDIT CORRELATION")
 # ---------------------------------------------------------------------------
-status, events = call("GET", "/api/v1/audit?limit=1000")
+status, events = call("GET", "/api/v1/audit?limit=1000", principal=cp_sign.IDENTITY_ADMIN)
 trail = [e for e in events if e.get("request_id") == f"a2a-{HAPPY_TXN}"]
 types = {e["event_type"] for e in trail}
 for expected in ("A2A_REQUEST", "A2A_SIGNATURE_VERIFIED",
@@ -699,7 +699,7 @@ for expected in ("A2A_REQUEST", "A2A_SIGNATURE_VERIFIED",
     check(f"  {expected}", expected in types, True)
 check("the whole arc is retrievable by ONE request id", len(trail) >= 10, True)
 
-status, one = call("GET", f"/api/v1/a2a/transactions/{HAPPY_TXN}")
+status, one = call("GET", f"/api/v1/a2a/transactions/{HAPPY_TXN}", principal=cp_sign.IDENTITY_ADMIN)
 check("the transaction record carries its signed envelope",
       (one.get("envelope") or {}).get("transactionId"), HAPPY_TXN)
 check("  ...and the attempts made against it", "attempts" in one, True)
@@ -767,7 +767,7 @@ print("      (measured on this host against the running stack. Not modelled.)")
 # WHAT DOMINATES THE ABSOLUTE NUMBERS, so nobody reads them as a Phase 7 cost.
 # The PDP records real per-stage timings; printing them here means the figures
 # above explain themselves instead of inviting a guess.
-status, decisions = call("GET", "/api/v1/authorize/decisions?limit=1")
+status, decisions = call("GET", "/api/v1/authorize/decisions?limit=1", principal=cp_sign.IDENTITY_ADMIN)
 if decisions:
     stages = {s["name"]: s["duration_ms"] for s in decisions[0].get("stages", [])}
     detail = next((s["detail"] for s in decisions[0].get("stages", [])

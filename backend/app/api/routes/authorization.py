@@ -194,7 +194,8 @@ async def enforce(
     return result.to_dict()
 
 
-@router.get("/enforce/tools")
+@router.get("/enforce/tools", dependencies=[Depends(
+    ControlPlaneGuard("identity_read", target=fixed("tool_registry")))])
 async def protected_tools() -> list[dict[str, Any]]:
     """The protected tools and the resource/action each is authorized against.
 
@@ -205,7 +206,8 @@ async def protected_tools() -> list[dict[str, Any]]:
 
 
 # --- PAP -------------------------------------------------------------------
-@router.get("/policies")
+@router.get("/policies", dependencies=[Depends(
+    ControlPlaneGuard("policy_read", target=fixed("policy_set")))])
 async def list_policies(session: SessionDep, settings: SettingsDep) -> dict[str, Any]:
     """Policy lifecycle state, including drift between disk and the engine."""
     return await PolicyAdministrationPoint(session, settings).status_report()
@@ -248,7 +250,8 @@ async def deactivate_policy(
 
 
 # --- decisions -------------------------------------------------------------
-@router.get("/authorize/decisions")
+@router.get("/authorize/decisions", dependencies=[Depends(
+    ControlPlaneGuard("audit_read", target=fixed("decision_log")))])
 async def list_decisions(
     session: SessionDep,
     subject: str | None = None,

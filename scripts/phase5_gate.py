@@ -103,7 +103,7 @@ def call(method, path, body=None, *, principal=None, human=None, agent=False,
     if agent:
         data, headers = agent_headers(method, path, body)
     elif principal:
-        data, headers = cp_sign.signed(principal, method, path, body)
+        data, headers = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         data = json.dumps(body).encode() if body is not None else None
         headers = {"Content-Type": "application/json"}
@@ -175,7 +175,7 @@ print(f"      issuer     : {health['identity_provider']['issuer']}")
 print(f"      authority  : {health['approval_authority']['did']}")
 print(f"      approval TTL: {health['approval_ttl_seconds']}s")
 
-status, config = call("GET", "/api/v1/hitl/config")
+status, config = call("GET", "/api/v1/hitl/config", principal=cp_sign.IDENTITY_ADMIN)
 check("OIDC flow is authorization code + PKCE", config["flow"],
       "authorization_code+pkce")
 
@@ -326,7 +326,7 @@ body = enforce(OTHER_LOAN, request_id=reject_request)
 check("DENY", body["decision"]["decision"], "DENY")
 check("reason", body["decision"]["reason"], "APPROVAL_REJECTED")
 check("the tool did NOT run", body["executed"], False)
-status, loan = call("GET", "/api/v1/hitl/approvals?limit=1")
+status, loan = call("GET", "/api/v1/hitl/approvals?limit=1", principal=cp_sign.IDENTITY_ADMIN)
 print("      -> no protected action occurred")
 
 # --- 11. S-7 -----------------------------------------------------------------
@@ -353,7 +353,7 @@ for label, method, path, payload in s7:
     check(f"anonymous {label} refused", (status, reason(refused)),
           (401, "CONTROL_PLANE_PROOF_MISSING"))
 
-status, agents = call("GET", "/api/v1/agents")
+status, agents = call("GET", "/api/v1/agents", principal=cp_sign.IDENTITY_ADMIN)
 risk = next((a for a in agents if a["slug"] == "risk-001"), None)
 status, refused = call("POST", f"/api/v1/agents/{risk['id']}/status",
                        {"status": "TERMINATED", "reason": "x"})
@@ -372,11 +372,11 @@ status, created = call("POST", "/api/v1/agents", {
 }, human="iam.admin")
 check("IAM_ADMIN creates an agent", status in (201, 409), True)
 check("the agent is still ACTIVE",
-      call("GET", f"/api/v1/agents/{risk['id']}")[1]["status"], "ACTIVE")
+      call("GET", f"/api/v1/agents/{risk['id']}", principal=cp_sign.IDENTITY_ADMIN)[1]["status"], "ACTIVE")
 
 # --- 12. audit ---------------------------------------------------------------
 print("\n  STEP 12  The whole flow is correlated in the audit trail")
-_, events = call("GET", "/api/v1/audit?limit=500")
+_, events = call("GET", "/api/v1/audit?limit=500", principal=cp_sign.IDENTITY_ADMIN)
 types = [e["event_type"] for e in events]
 for expected in ("HUMAN_AUTHENTICATED", "APPROVAL_REQUESTED", "APPROVAL_VIEWED",
                  "APPROVAL_APPROVED", "APPROVAL_REJECTED",

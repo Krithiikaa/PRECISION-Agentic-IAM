@@ -1,0 +1,146 @@
+# Production overlay (Phase 10).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# WHAT THIS IS. An overlay that replaces the development-mode settings in
+# docker-compose.yml with ones appropriate for a real deployment. The base
+# file is unchanged and still works on its own, because breaking the POC to
+# make a production file look tidy would be a bad trade.
+#
+# WHAT THIS IS NOT. A complete production deployment. It contains NO secrets
+# and NO certificates, by design -- every value below comes from the
+# environment, and the service refuses to start if the important ones are
+# missing or insecure (see backend/app/core/config.py and
+# docs/PRODUCTION_DEPLOYMENT.md).
+#
+# THE SINGLE BIGGEST THING THIS FILE DOES NOT DO: terminate TLS. There is no
+# reverse proxy here. `ENV=production` forces every security-critical URL to
+# https, which means the service will refuse to start until an operator has
+# put something in front of it that actually serves https. That refusal is
+# deliberate -- it is better than starting and quietly serving tokens in
+# clear.
+
+services:
+  postgres:
+    # No published port. In development 5433 is exposed for psql and the
+    # gates; in production the database is reachable only on the compose
+    # network. An exposed database port is the most common way a "hardened"
+    # deployment stays soft.
+    ports: !override []
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+    command:
+      - postgres
+      # Require TLS for client connections. The certificate is operator
+      # supplied; see docs/PRODUCTION_DEPLOYMENT.md.
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/certs/server.crt
+      - -c
+      - ssl_key_file=/certs/server.key
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ${POSTGRES_CERT_DIR:?set POSTGRES_CERT_DIR}:/certs:ro
+
+  redis:
+    # Redis is NOT optional in production: it is the shared counter behind
+    # rate limiting, and `RATELIMIT_REDIS_POLICY=fail_closed` means the API
+    # refuses requests when it is unreachable. Phase 9 recorded Redis as an
+    # unused dependency; Phase 10 is what uses it.
+    ports: !override []
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+
+  opa:
+    # Policy decisions must not be reachable from outside the compose
+    # network. Anyone who can POST to OPA decides authorization.
+    ports: !override []
+
+  keycloak:
+    # PRODUCTION MODE. `start-dev` disables hostname checking, serves plain
+    # HTTP, and uses an in-memory database that loses every user on restart.
+    command:
+      - start
+      - --optimized
+      - --import-realm
+    environment:
+      # Keycloak's own database. `start-dev` uses an ephemeral H2; a
+      # production realm that disappears on restart takes every human
+      # identity with it.
+      KC_DB: postgres
+      KC_DB_URL: ${KC_DB_URL:?set KC_DB_URL}
+      KC_DB_USERNAME: ${KC_DB_USERNAME:?set KC_DB_USERNAME}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD}
+
+      # The public hostname. Keycloak writes this into the token `iss`
+      # claim, and this service compares `iss` EXACTLY -- so a mismatch here
+      # refuses every token with a signature error that is not a signature
+      # error.
+      KC_HOSTNAME: ${KC_HOSTNAME:?set KC_HOSTNAME e.g. https://sso.example.com}
+      KC_HOSTNAME_STRICT: "true"
+
+      # Behind a TLS-terminating proxy. Without this Keycloak builds
+      # redirect URLs with the wrong scheme and the login loop never closes.
+      KC_PROXY_HEADERS: xforwarded
+      KC_HTTP_ENABLED: "false"
+      KC_HTTPS_CERTIFICATE_FILE: ${KC_CERT_FILE:?set KC_CERT_FILE}
+      KC_HTTPS_CERTIFICATE_KEY_FILE: ${KC_CERT_KEY_FILE:?set KC_CERT_KEY_FILE}
+
+      KC_HEALTH_ENABLED: "true"
+      # Bootstrap admin. Used ONCE to create the first real administrator,
+      # then removed -- see the deployment checklist. Leaving it set is
+      # leaving a known-username account on an internet-facing SSO.
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN:?set KEYCLOAK_ADMIN}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+    ports: !override []
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+      - ${KC_CERT_DIR:?set KC_CERT_DIR}:/certs:ro
+
+  iam-api:
+    environment:
+      ENV: production
+      # Every one of these is REQUIRED and has no default. The service
+      # refuses to start without them, which is the point: a production
+      # deployment that silently fell back to a development value would be
+      # the worst outcome available.
+      KEYSTORE_MASTER_KEY: ${KEYSTORE_MASTER_KEY:?generate with python3 -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL including the password}
+
+      # ENV=production refuses any of these over plaintext http.
+      API_PUBLIC_URL: ${API_PUBLIC_URL:?set API_PUBLIC_URL e.g. https://api.example.com}
+      OPA_URL: ${OPA_URL:-https://opa:8181}
+      KEYCLOAK_BASE_URL: ${KC_HOSTNAME:?set KC_HOSTNAME}
+      KEYCLOAK_ISSUER: ${KEYCLOAK_ISSUER:?set KEYCLOAK_ISSUER e.g. https://sso.example.com/realms/agentic-iam}
+      MCP_RESOURCE_URI: ${MCP_RESOURCE_URI:?set MCP_RESOURCE_URI e.g. https://api.example.com/mcp}
+
+      # Rate limiting. `fail_closed` is enforced by the config validator in
+      # production: the alternative counts in process memory, which across N
+      # workers is an N-times-looser limit that still reports as enforced.
+      RATELIMIT_ENABLED: "true"
+      RATELIMIT_REDIS_POLICY: fail_closed
+      # Whose X-Forwarded-For to believe. EMPTY means nobody. Set this to
+      # the proxy's network or the rate limiter keys on the proxy's address
+      # and limits the whole internet as one caller.
+      TRUSTED_PROXY_NETWORKS_RAW: ${TRUSTED_PROXY_NETWORKS:?set TRUSTED_PROXY_NETWORKS to your ingress CIDR}
+
+      # CORS. Must be https in production, and must not be '*' while
+      # credentials are enabled -- both refused by the validator.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS e.g. https://console.example.com}
+    # Not published directly: a TLS-terminating reverse proxy sits in front.
+    ports: !override []
+
+  ans:
+    environment:
+      ENV: production
+      KEYSTORE_MASTER_KEY: ${KEYSTORE_MASTER_KEY:?set KEYSTORE_MASTER_KEY}
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+    ports: !override []

@@ -6,6 +6,29 @@ set -uo pipefail
 API=${IAM_API_URL:-http://localhost:8000}
 RISK=${RISK_AGENT_URL:-http://localhost:9003}
 DID="did:poc:agent:risk-001"
+
+# PHASE 10. Reading the agent registry is now an authorized operation
+# (`identity_read`). This gate signs those reads as the identity
+# administrator, using the same cp_sign helper every other gate uses.
+# DID DOCUMENTS stay public -- they are published key material by design --
+# so only the registry reads below are signed.
+signed_get() {
+  python3 - "$1" <<'PYEOF'
+import json, sys, pathlib, urllib.request, urllib.error
+REPO = pathlib.Path(__file__).resolve().parents[0] if False else pathlib.Path("/home/krithiii/Downloads/Precision-August/AGENTIC-IAM-V1-GPT")
+sys.path.insert(0, str(REPO / "scripts")); sys.path.insert(0, str(REPO / "backend"))
+import cp_sign
+url = sys.argv[1]
+path = url.split("://", 1)[-1]
+path = "/" + path.split("/", 1)[1] if "/" in path else "/"
+data, headers = cp_sign.signed(cp_sign.IDENTITY_ADMIN, "GET", path.split("?", 1)[0], None)
+try:
+    with urllib.request.urlopen(urllib.request.Request(url, None, headers, method="GET"), timeout=20) as r:
+        sys.stdout.write(r.read().decode())
+except urllib.error.HTTPError as e:
+    sys.stdout.write(e.read().decode())
+PYEOF
+}
 MESSAGE="I am the Risk Analysis Agent"
 TAMPERED="I am the Payroll Agent"
 PASS=0; FAIL=0
@@ -17,7 +40,7 @@ check() { # check <name> <actual> <expected>
 }
 
 echo "=== TEST 1: agent identity exists with a DID and an Ed25519 key ==="
-AGENT=$(curl -s "$API/api/v1/agents/did/$DID")
+AGENT=$(signed_get "$API/api/v1/agents/did/$DID")
 echo "$AGENT" | jqp "f\"  DID        {d['did']}\n  Name       {d['name']}\n  Status     {d['status']}\n  Algorithm  {d['active_key']['algorithm']}\n  Public key {d['active_key']['public_key_multibase']}\n  Custody    {d['active_key']['keystore_backend']}\""
 check "DID assigned"      "$(echo "$AGENT" | jqp "d['did']")" "$DID"
 check "status ACTIVE"     "$(echo "$AGENT" | jqp "d['status']")" "ACTIVE"
@@ -58,7 +81,7 @@ check "tampered message INVALID" "$(echo "$V2" | jqp "str(d['valid'])")" "False"
 
 echo
 echo "=== TEST 7: a second agent has a different DID and a different key ==="
-OTHER=$(curl -s "$API/api/v1/agents/did/did:poc:agent:fraud-001")
+OTHER=$(signed_get "$API/api/v1/agents/did/did:poc:agent:fraud-001")
 K1=$(echo "$AGENT" | jqp "d['active_key']['public_key_multibase']")
 K2=$(echo "$OTHER" | jqp "d['active_key']['public_key_multibase']")
 echo "  risk-001  $K1"

@@ -111,11 +111,23 @@ class Coordinator:
         llm: LLMProvider,
         iam_client: httpx.AsyncClient,
         did: str,
+        sign_read=None,
     ) -> None:
         self.ans = ans
         self.llm = llm
         self.iam = iam_client
         self.did = did
+        # PHASE 10. Reading the agent registry became an authorized
+        # operation (`identity_read`), and this coordinator reads it to
+        # cross-check what ANS told it against the identity authority --
+        # the check that makes an endpoint substitution in the directory
+        # detectable. Unsigned, that read is now 401 and the cross-check
+        # silently stops being a cross-check, so the agent signs it with
+        # the same key and the same proof it uses for a heartbeat.
+        self.sign_read = sign_read
+
+    def _read_headers(self, path: str) -> dict:
+        return self.sign_read(path) if self.sign_read else {}
 
     # --- step 1 + 2: which capability does this task need? ----------------
     async def resolve_capability(self, task: str) -> CapabilityResolution:
@@ -190,7 +202,9 @@ class Coordinator:
 
         # 1. The identity exists and is ACTIVE according to the registry.
         try:
-            response = await self.iam.get(f"/api/v1/agents/did/{did}", timeout=10.0)
+            path = f"/api/v1/agents/did/{did}"
+            response = await self.iam.get(
+                path, timeout=10.0, headers=self._read_headers(path))
             response.raise_for_status()
             identity = response.json()
         except httpx.HTTPError as exc:

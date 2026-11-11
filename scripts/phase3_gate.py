@@ -38,14 +38,21 @@ PASSED = 0
 FAILED = 0
 
 
-def call(method, url, body=None, timeout=120):
+def call(method, url, body=None, principal=None, timeout=120):
     # PHASE 5 / S-7: credential issuance and revocation are authorized now.
     # Signed as the machine identity administrator. ANS registration is
     # unchanged -- it has carried its own signed proof since Phase 3.
     path = url[url.index("/api/"):] if "/api/" in url else url
-    if method == "POST" and (path.endswith("/credentials/issue")
-                             or path.endswith("/revoke")
-                             or path.endswith("/api/v1/agents")):
+    # PHASE 10. Sensitive READS are authorized now too, so a caller may name
+    # the principal to read as. The signed path EXCLUDES the query string --
+    # the server signs `request.url.path` -- and signing it would produce a
+    # 401 that looks exactly like a missing role.
+    if principal is not None:
+        data, headers = cp_sign.signed(
+            principal, method, path.split("?", 1)[0], body)
+    elif method == "POST" and (path.endswith("/credentials/issue")
+                               or path.endswith("/revoke")
+                               or path.endswith("/api/v1/agents")):
         data, headers = cp_sign.signed(cp_sign.IDENTITY_ADMIN, method, path, body)
     else:
         data = json.dumps(body).encode() if body is not None else None
@@ -343,13 +350,13 @@ REQUIRED_EVENTS = (
     "ANS_AGENT_RESOLVED", "COORDINATOR_CAPABILITY_RESOLVED",
 )
 for required in REQUIRED_EVENTS:
-    _, rows = call("GET", f"{API}/api/v1/audit?event_type={required}&limit=5")
+    _, rows = call("GET", f"{API}/api/v1/audit?event_type={required}&limit=5", principal=cp_sign.IDENTITY_ADMIN)
     print(f"    {required:<38} {len(rows)} recorded")
     check(f"{required} recorded", len(rows) > 0, True)
 
 # Heartbeats are deliberately NOT audited unless they carry information: a
 # routine "still alive" every 15s from every agent would bury everything else.
-_, beats = call("GET", f"{API}/api/v1/audit?event_type=ANS_HEARTBEAT_RECEIVED&limit=50")
+_, beats = call("GET", f"{API}/api/v1/audit?event_type=ANS_HEARTBEAT_RECEIVED&limit=50", principal=cp_sign.IDENTITY_ADMIN)
 print(f"    ANS_HEARTBEAT_RECEIVED (status changes only)  {len(beats)} recorded")
 check("routine heartbeats are not audited as events",
       all(e.get("reason") == "STATUS_CHANGED" for e in beats), True)

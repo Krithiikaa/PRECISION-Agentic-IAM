@@ -1,0 +1,42 @@
+{
+  "_comment": [
+    "MCP channel configuration (Phase 8). Read by policies/mcp/invocation.rego.",
+    "",
+    "WHAT THIS DOCUMENT IS: the set of actions that may be reached over the MCP",
+    "transport at all. It is a RISK decision -- 'should this be remotely",
+    "invocable by an agent holding an OAuth token?' -- and risk decisions belong",
+    "in configuration a risk owner changes, not in Python a developer changes.",
+    "",
+    "WHAT THIS DOCUMENT IS NOT: an authorization grant. An action on this list is",
+    "merely CARRIABLE over MCP. Whether a particular agent may perform it is",
+    "decided by every ordinary rule in the set -- credential validity, capability,",
+    "resource scope, purpose scope, sensitive-action escalation, amount bands,",
+    "approvals and mandates -- exactly as it would be on any other channel.",
+    "Adding an action here can never widen what an agent may do; it can only stop",
+    "narrowing it.",
+    "",
+    "WHY `execute_payment` IS ABSENT, and this is the substantive risk decision",
+    "in this file. A payment instruction is already carried by the Phase 7 A2A",
+    "channel, where it arrives inside an envelope signed by the instructing",
+    "agent's own Ed25519 key, bound to a receiver, non-replayable, and reconciled",
+    "against the server's figure four separate times. An MCP tools/call carries a",
+    "bearer token and nothing else: there is no signed instruction, so there is",
+    "no artifact to show a human during approval and nothing to non-repudiate",
+    "with afterwards. Exposing payments over a bearer-authenticated transport",
+    "would be a strictly weaker path to the same action, and the weaker path is",
+    "the one an attacker takes.",
+    "",
+    "WHY `approve_loan` IS PRESENT despite being sensitive. It is reachable, but",
+    "reaching it is not the same as doing it: security/sensitive.rego escalates",
+    "it to a human and loan/amount.rego decides how many, so an MCP client can",
+    "at most OPEN an approval request. Dual control is unaffected by the channel",
+    "the request arrived on, which is the property Phase 8's tests assert.",
+    "",
+    "FAILS CLOSED: mcp/invocation.rego denies with MCP_POLICY_UNCONFIGURED when",
+    "this document is not loaded. An absent list is never 'everything'."
+  ],
+  "eligible_actions": [
+    "read",
+    "approve_loan"
+  ]
+}

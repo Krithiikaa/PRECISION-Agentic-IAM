@@ -132,7 +132,8 @@ async def request_grant(
     return result.to_dict()
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(
+    ControlPlaneGuard("grant_read", target=fixed("grant_registry")))])
 async def list_grants(
     session: SessionDep,
     agent_did: str = Query(description="Whose mandates to list."),
@@ -173,7 +174,8 @@ async def key_register(
     }
 
 
-@router.get("/{grant_id}")
+@router.get("/{grant_id}", dependencies=[Depends(
+    ControlPlaneGuard("grant_read", target=path_param("grant_id")))])
 async def read_grant(grant_id: str, session: SessionDep) -> dict[str, Any]:
     """One mandate, its signed artifact, and every use spent against it."""
     service = JITService(session)

@@ -315,12 +315,12 @@ class TestSecurityBoundary:
                  if a["did"] == did][0]
         assert agent["status"] == "ACTIVE"
 
-    async def test_attacker_cannot_mutate_policy(self, client, policies_loaded):
+    async def test_attacker_cannot_mutate_policy(self, policy_admin_get, cp_get, client, policies_loaded):
         response = await client.post("/api/v1/policies/loan-credit-read/deactivate")
         assert response.status_code == 401
 
         # And the policy is genuinely still loaded and still deciding.
-        report = (await client.get("/api/v1/policies")).json()
+        report = (await policy_admin_get("/api/v1/policies")).json()
         loaded = {p["policy_id"]: p for p in report["policies"]}
         assert loaded["loan-credit-read"]["in_engine"] is True
 
@@ -464,7 +464,7 @@ class TestSigningOracleIsClosed:
         assert response.json()["detail"]["reason"] == "AGENT_MAY_NOT_ADMINISTER"
 
     async def test_the_full_forgery_chain_is_broken(
-        self, client, cp_post, ans_client, registered_risk_agent, opa_ready
+        self, cp_get, client, cp_post, ans_client, registered_risk_agent, opa_ready
     ):
         """The complete attack, end to end, refused at its first step.
 
@@ -475,7 +475,7 @@ class TestSigningOracleIsClosed:
         Without the middle step the attacker cannot produce a signature over
         the control-plane payload, so the heartbeat has nothing to present.
         """
-        agents = (await client.get("/api/v1/agents")).json()
+        agents = (await cp_get("/api/v1/agents")).json()
         victim = [a for a in agents if a["did"] == registered_risk_agent.did][0]
 
         forged = await client.post(f"/api/v1/agents/{victim['id']}/sign",
@@ -594,24 +594,33 @@ class TestControlPlaneAudit:
     """§17: every security-sensitive control-plane action produces an event."""
 
     async def test_an_accepted_operation_is_audited_with_its_principal(
-        self, ans_post, client, registered_risk_agent, opa_ready
+        self, cp_get, ans_post, client, registered_risk_agent, opa_ready
     ):
         did = registered_risk_agent.did
         await ans_post(HEARTBEAT, did, {"did": did})
 
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         types = {e["event_type"] for e in events}
         assert {"CONTROL_PLANE_AUTHENTICATED", "CONTROL_PLANE_AUTHORIZED",
                 "ANS_HEARTBEAT_ACCEPTED"} <= types
 
-        authorized = [e for e in events
-                      if e["event_type"] == "CONTROL_PLANE_AUTHORIZED"][0]
+        # SELECT THE EVENT THIS TEST MEANS, rather than the most recent one.
+        # Phase 10 made reading the audit trail itself an authorized
+        # operation, so fetching it appends a `cp-administration` event of
+        # its own -- and "the latest authorized event" became the reader's,
+        # not the agent's. Filtering on the DID under test is what the
+        # assertion was always about.
+        authorized = [
+            e for e in events
+            if e["event_type"] == "CONTROL_PLANE_AUTHORIZED"
+            and e["agent_did"] == did
+        ][0]
         for field in ("request_id", "agent_did", "action", "decision", "reason"):
             assert authorized[field], field
         assert authorized["metadata"]["policy"] == "cp-agent-self:v1"
 
     async def test_a_refusal_survives_the_rejection(
-        self, ans_client, client, registered_risk_agent, opa_ready
+        self, cp_get, ans_client, client, registered_risk_agent, opa_ready
     ):
         """The refusal is COMMITTED before the exception is raised.
 
@@ -620,7 +629,7 @@ class TestControlPlaneAudit:
         """
         await ans_client.post(HEARTBEAT, json={"did": registered_risk_agent.did})
 
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         types = {e["event_type"] for e in events}
         assert "CONTROL_PLANE_REJECTED" in types
         assert "ANS_HEARTBEAT_REJECTED" in types
@@ -631,7 +640,7 @@ class TestControlPlaneAudit:
         assert rejected["decision"] == "REJECTED"
 
     async def test_a_replay_is_audited_as_a_replay(
-        self, ans_client, client, sign_control_plane, registered_risk_agent, opa_ready
+        self, cp_get, ans_client, client, sign_control_plane, registered_risk_agent, opa_ready
     ):
         """A replay is evidence of a CAPTURED proof, not a broken client."""
         did = registered_risk_agent.did
@@ -640,15 +649,15 @@ class TestControlPlaneAudit:
         await ans_client.post(HEARTBEAT, content=body, headers=headers)
         await ans_client.post(HEARTBEAT, content=body, headers=headers)
 
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         assert "CONTROL_PLANE_REPLAY_DETECTED" in {e["event_type"] for e in events}
 
     async def test_a_denied_administrative_attempt_names_the_policy(
-        self, cp_post, client, control_plane, identity_admin_did, policies_loaded
+        self, cp_get, cp_post, client, control_plane, identity_admin_did, policies_loaded
     ):
         await cp_post("/api/v1/policies/loan-credit-read/deactivate",
                       identity_admin_did)
-        events = (await client.get("/api/v1/audit?limit=200")).json()
+        events = (await cp_get("/api/v1/audit?limit=200")).json()
         denied = [e for e in events if e["event_type"] == "CONTROL_PLANE_DENIED"]
         assert denied
         assert denied[0]["reason"] == "MISSING_CONTROL_PLANE_ROLE"

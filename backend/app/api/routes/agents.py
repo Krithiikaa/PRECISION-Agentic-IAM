@@ -16,7 +16,7 @@ from app.api.schemas import (
     SignResponse,
     StatusChangeRequest,
 )
-from app.controlplane.guard import ControlPlaneGuard, body_key, path_param
+from app.controlplane.guard import ControlPlaneGuard, body_key, fixed, path_param
 from app.db.models.agent import Agent, AgentStatus, AgentType
 from app.db.models.credential import CredentialStatusValue
 from app.db.repositories.credentials import CredentialRepository
@@ -78,7 +78,8 @@ async def create_agent(body: CreateAgentRequest, registry: RegistryDep) -> Agent
     return AgentResponse.from_model(agent)
 
 
-@router.get("", response_model=list[AgentResponse])
+@router.get("", response_model=list[AgentResponse], dependencies=[Depends(
+    ControlPlaneGuard("identity_read", target=fixed("agent_registry")))])
 async def list_agents(
     registry: RegistryDep,
     agent_status: AgentStatus | None = Query(default=None, alias="status"),
@@ -97,12 +98,14 @@ async def list_agents(
     return [AgentResponse.from_model(a) for a in agents]
 
 
-@router.get("/did/{did}", response_model=AgentResponse)
+@router.get("/did/{did}", response_model=AgentResponse, dependencies=[Depends(
+    ControlPlaneGuard("identity_read", target=path_param("did")))])
 async def get_agent_by_did(did: str, registry: RegistryDep, session: SessionDep) -> AgentResponse:
     return await _with_credentials(session, await registry.get_agent(did))
 
 
-@router.get("/did/{did}/credentials")
+@router.get("/did/{did}/credentials", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=path_param("did")))])
 async def credentials_by_did(did: str, registry: RegistryDep, session: SessionDep,
                              include_document: bool = False) -> list[dict]:
     """Credentials held by an agent. Used by agent processes to load their wallet."""
@@ -127,14 +130,16 @@ async def get_did_document_by_did(did: str, registry: RegistryDep) -> dict:
     return await registry.resolve_did_document(did)
 
 
-@router.get("/{agent_id}", response_model=AgentResponse)
+@router.get("/{agent_id}", response_model=AgentResponse, dependencies=[Depends(
+    ControlPlaneGuard("identity_read", target=path_param("agent_id")))])
 async def get_agent(
     agent_id: uuid.UUID, registry: RegistryDep, session: SessionDep
 ) -> AgentResponse:
     return await _with_credentials(session, await registry.get_agent_by_id(agent_id))
 
 
-@router.get("/{agent_id}/credentials")
+@router.get("/{agent_id}/credentials", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=path_param("agent_id")))])
 async def agent_credentials(
     agent_id: uuid.UUID, registry: RegistryDep, session: SessionDep
 ) -> list[dict]:
@@ -181,7 +186,8 @@ async def change_status(
     return AgentResponse.from_model(updated)
 
 
-@router.get("/{agent_id}/audit")
+@router.get("/{agent_id}/audit", dependencies=[Depends(
+    ControlPlaneGuard("audit_read", target=path_param("agent_id")))])
 async def agent_audit(agent_id: uuid.UUID, registry: RegistryDep, limit: int = 100) -> list[dict]:
     agent = await registry.get_agent_by_id(agent_id)
     return await registry.audit.query(agent_did=agent.did, limit=limit)

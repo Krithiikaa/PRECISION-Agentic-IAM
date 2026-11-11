@@ -16,14 +16,15 @@ from fastapi import APIRouter, Depends, Query, Request, status
 
 from app.api.deps import SessionDep
 from app.api.schemas import AuditEventIn
-from app.controlplane.guard import ControlPlaneGuard, body_key
+from app.controlplane.guard import ControlPlaneGuard, body_key, fixed
 from app.audit.service import AuditService
 from app.monitoring.events import Event
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(
+    ControlPlaneGuard("audit_read", target=fixed("audit_trail")))])
 async def query_audit(
     session: SessionDep,
     event_type: str | None = None,

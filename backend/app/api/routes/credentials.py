@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, Query, status as http_status
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import KeyStoreDep, RegistryDep, SessionDep, SettingsDep
-from app.controlplane.guard import ControlPlaneGuard, body_key, path_param
+from app.controlplane.guard import ControlPlaneGuard, body_key, fixed, path_param
 from app.core.errors import NotFoundError
 from app.credentials.issuer import CredentialIssuer, IssueRequest
+from app.credentials.challenge import ChallengeService
 from app.credentials.issuer_registry import IssuerRegistry
 from app.credentials.presentation import new_challenge
 from app.credentials.presenter import CredentialPresenter, PresentationVerifier
@@ -113,7 +114,8 @@ class CredentialSummary(BaseModel):
 
 
 # --- issuers ---------------------------------------------------------------
-@router.get("/issuers")
+@router.get("/issuers", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=fixed("issuer_registry")))])
 async def list_issuers(session: SessionDep, keystore: KeyStoreDep) -> list[dict]:
     """The trust roots. Public keys only; issuer private keys never leave the keystore."""
     issuers = await IssuerRegistry(session, keystore).list_issuers()
@@ -190,13 +192,33 @@ async def verify_presentation(
 
 
 @router.get("/challenge")
-async def challenge() -> dict:
-    """A fresh nonce for a holder to bind into a presentation.
+async def challenge(
+    session: SessionDep, settings: SettingsDep, domain: str | None = None,
+) -> dict:
+    """A fresh, RECORDED, single-use nonce for a holder to bind into a
+    presentation.
 
-    NOTE: not yet single-use. Replay protection needs shared state across
-    processes and lands with the Session State Synchroniser in Phase 9.
+    PHASE 10 MADE THIS REAL. Until now the endpoint returned an
+    unpredictable value and recorded nothing, so a captured presentation
+    could be replayed against any verifier that reused a challenge -- a gap
+    this codebase had documented since Phase 2 and carried through Phase 9.
+
+    Recording at ISSUE time is what lets an unknown value be refused. If
+    challenges were only remembered once used, an attacker could invent one
+    and have it accepted precisely because it had never been seen.
+
+    STILL UNAUTHENTICATED, deliberately: a holder must be able to obtain a
+    challenge before it can prove anything, and the value grants nothing. It
+    is single-use, short-lived, bound to its verifier, and useless without a
+    valid holder proof over credentials that pass every other check.
     """
-    return {"challenge": new_challenge(), "single_use_enforced": False}
+    record = await ChallengeService(session, settings).issue(domain=domain)
+    return {
+        "challenge": record.challenge,
+        "domain": record.domain,
+        "expires_at": record.expires_at.isoformat(),
+        "single_use_enforced": True,
+    }
 
 
 # --- presentation ----------------------------------------------------------
@@ -215,7 +237,8 @@ async def present(body: PresentRequest, session: SessionDep, keystore: KeyStoreD
 
 
 # --- registry --------------------------------------------------------------
-@router.get("")
+@router.get("", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=fixed("credential_inventory")))])
 async def list_credentials(
     session: SessionDep,
     subject: str | None = None,
@@ -231,7 +254,8 @@ async def list_credentials(
     return [CredentialSummary.from_model(r).model_dump(mode="json") for r in records]
 
 
-@router.get("/{credential_id:path}/status")
+@router.get("/{credential_id:path}/status", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=path_param("credential_id")))])
 async def credential_status(credential_id: str, session: SessionDep) -> dict:
     return await CredentialStatusService(session).get(credential_id)
 
@@ -244,7 +268,8 @@ async def revoke(credential_id: str, body: RevokeRequest, session: SessionDep) -
     )
 
 
-@router.get("/{credential_id:path}/verifications")
+@router.get("/{credential_id:path}/verifications", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=path_param("credential_id")))])
 async def credential_verifications(
     credential_id: str, session: SessionDep, limit: int = 50
 ) -> list[dict]:
@@ -264,7 +289,8 @@ async def credential_verifications(
     ]
 
 
-@router.get("/{credential_id:path}")
+@router.get("/{credential_id:path}", dependencies=[Depends(
+    ControlPlaneGuard("credential_read", target=path_param("credential_id")))])
 async def get_credential(credential_id: str, session: SessionDep) -> dict:
     record = await CredentialRepository(session).get(credential_id)
     if record is None:

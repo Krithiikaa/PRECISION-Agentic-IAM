@@ -275,7 +275,17 @@ class AdapterEnforcementMiddleware:
         credentials: list[str] | None = None,
         approval_id: str | None = None,
         jit_grant_id: str | None = None,
+        mcp: Any = None,
     ) -> EnforcementResult:
+        """Authorize and, on ALLOW, execute ONE invocation of one tool.
+
+        `mcp` (Phase 8) is the verdict the MCP transport established about an
+        authenticated, session-bound invocation. Optional and defaulting to
+        absent, so every existing caller is unchanged and an ordinary request
+        is decided exactly as it was before Phase 8 existed. It is a FACT in
+        the input document, never a permission: `mcp/invocation.rego` decides
+        what it means, and a valid access token has never been an ALLOW.
+        """
         started = time.perf_counter()
         arguments = dict(arguments or {})
         request_id = request_id or new_request_id()
@@ -323,7 +333,13 @@ class AdapterEnforcementMiddleware:
             jit_grant_id=jit_grant_id,
         )
 
-        decision = await self.pdp.decide(request)
+        # `mcp=` is passed ONLY when there is a verdict to pass. A caller
+        # from any earlier phase -- and any PDP substituted by a test --
+        # therefore sees exactly the call it saw before Phase 8 existed.
+        decision = await (
+            self.pdp.decide(request, mcp=mcp) if mcp is not None
+            else self.pdp.decide(request)
+        )
 
         # --- Phase 5: escalation opens a real approval request -------------
         if decision.decision is Decision.HUMAN_APPROVAL_REQUIRED:

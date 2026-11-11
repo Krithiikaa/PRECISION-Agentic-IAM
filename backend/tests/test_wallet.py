@@ -118,20 +118,20 @@ class TestWalletContents:
 
 class TestHolderProof:
     async def test_wallet_signs_a_verifiable_presentation(
-        self, session, keystore, issued_credential, risk_agent, issuers
+        self, fresh_challenge, session, keystore, issued_credential, risk_agent, issuers
     ):
         wallet = _wallet_for(risk_agent, keystore, [_entry(issued_credential)])
         await wallet.refresh()
         document = wallet.present(
-            wallet.select(capability="credit_analysis"), challenge="nonce-9"
+            wallet.select(capability="credit_analysis"), challenge=fresh_challenge
         )
 
         assert document["holder"] == risk_agent.did
         assert document["proof"]["verificationMethod"] == risk_agent.active_key.kid
-        assert document["proof"]["challenge"] == "nonce-9"
+        assert document["proof"]["challenge"] == fresh_challenge
 
         report = await PresentationVerifier(session, keystore).verify(
-            document, expected_challenge="nonce-9"
+            document, expected_challenge=fresh_challenge
         )
         assert report.valid
 

@@ -54,6 +54,11 @@ PUBLIC_ROUTES: dict[str, str] = {
     "/ready": "readiness probe; same reasoning",
     "/api/v1/a2a/health": "liveness probe for the A2A surface",
     "/api/v1/hitl/health": "liveness probe for the HITL surface",
+    "/api/v1/hitl/config":
+        "the OIDC discovery parameters a browser needs to START a login "
+        "(issuer, client id, endpoints). Guarding it made sign-in require a "
+        "token, which locked every human out of the console after Phase 10. "
+        "The console is a public PKCE client: nothing here is secret",
     "/api/v1/authorize/health": "liveness probe for the policy engine",
     "/.well-known/oauth-protected-resource":
         "RFC 9728 requires this reachable WITHOUT a token: it tells a client "
@@ -251,3 +256,12 @@ class TestTheOperationCatalogueIsCoherent:
         }
         unmounted = sorted(phase10 - mounted)
         assert not unmounted, f"declared but mounted nowhere: {unmounted}"
+
+
+async def test_the_login_bootstrap_is_reachable_without_a_token(client):
+    """REGRESSION. A login cannot require a login."""
+    response = await client.get("/api/v1/hitl/config")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["flow"] == "authorization_code+pkce"
+    assert "secret" not in str(body).lower()

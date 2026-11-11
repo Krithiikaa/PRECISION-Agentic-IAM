@@ -50,6 +50,9 @@ class CredentialType:
     AGENT_CAPABILITY = "AgentCapabilityCredential"
     COMPLIANCE = "ComplianceCredential"
     AGENT_ROLE = "AgentRoleCredential"
+    # The verifiable parent link of a delegated identity (CSA paper R-65,
+    # R-87 "SpawnedBy" provenance credential).
+    AGENT_PROVENANCE = "AgentProvenanceCredential"
 
 
 # Claims a credential of each type must carry to be well formed. Verifiers
@@ -60,6 +63,7 @@ REQUIRED_CLAIMS: dict[str, tuple[str, ...]] = {
     ),
     CredentialType.COMPLIANCE: ("framework", "status", "scope"),
     CredentialType.AGENT_ROLE: ("role", "department"),
+    CredentialType.AGENT_PROVENANCE: ("spawnedBy", "relationship", "depth"),
 }
 
 # Claim keys that would collide with data-model fields.

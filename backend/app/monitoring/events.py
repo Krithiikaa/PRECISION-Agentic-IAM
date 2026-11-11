@@ -251,18 +251,49 @@ class EventType:
     # know which.
     MCP_SESSION_TERMINATED = "MCP_SESSION_TERMINATED"
 
-    # --- Declared for later phases; NOT emitted yet ---
-    # NOTE: TOOL_EXECUTED has been emitted by the AEM since Phase 4. It was
-    # listed under Phase 8 here by a comment that was never corrected when the
-    # enforcement boundary landed; the name and value are unchanged.
+    # TOOL_EXECUTED has been emitted by the AEM since Phase 4. It sat in a
+    # "declared, not emitted" block by a comment that was never corrected
+    # when the enforcement boundary landed; the name and value are unchanged.
     TOOL_EXECUTED = "TOOL_EXECUTED"
-    SESSION_CREATED = "SESSION_CREATED"           # Phase 9
-    SESSION_REVOKED = "SESSION_REVOKED"           # Phase 9
-    SSS_UPDATED = "SSS_UPDATED"                   # Phase 9
-    ANOMALY_DETECTED = "ANOMALY_DETECTED"         # Phase 10
-    TRUST_UPDATED = "TRUST_UPDATED"               # Phase 10
-    A2A_SESSION_TERMINATED = "A2A_SESSION_TERMINATED"   # Phase 11
 
+    # --- Trust, anomaly detection, Session Authority, kill switch. EMITTED.
+    # (CSA paper sections 4.2 Layer 4, 5.3 and 5.4.)
+    ANOMALY_DETECTED = "ANOMALY_DETECTED"
+    ANOMALY_DETECTOR_DISABLED = "ANOMALY_DETECTOR_DISABLED"
+    TRUST_UPDATED = "TRUST_UPDATED"
+    SSS_UPDATED = "SSS_UPDATED"
+    # A protocol-level session (MCP, JIT mandate) ended by the Session
+    # Authority as part of a global logout, named per session kind in metadata.
+    SESSION_REVOKED = "SESSION_REVOKED"
+    INCIDENT_CONTAINED = "INCIDENT_CONTAINED"
+    INCIDENT_REINSTATED = "INCIDENT_REINSTATED"
+    INCIDENT_REINSTATEMENT_REFUSED = "INCIDENT_REINSTATEMENT_REFUSED"
+
+    # --- End-to-end loan workflow (blueprint). The specialist steps
+    # themselves are ordinary AEM events; these mark the workflow's edges.
+    LOAN_WORKFLOW_SUBMITTED = "LOAN_WORKFLOW_SUBMITTED"
+    LOAN_WORKFLOW_STEP = "LOAN_WORKFLOW_STEP"
+    LOAN_WORKFLOW_COMPLETED = "LOAN_WORKFLOW_COMPLETED"
+
+    # Phase 12: durable workflow transitions (every state change is one row
+    # in loan_workflow_transitions AND one of these events, same request id).
+    LOAN_WORKFLOW_TRANSITION = "LOAN_WORKFLOW_TRANSITION"
+
+    # --- Phase 12: tamper-evident audit trail. EMITTED by app/audit/chain.py.
+    AUDIT_INTEGRITY_VERIFIED = "AUDIT_INTEGRITY_VERIFIED"
+    AUDIT_INTEGRITY_VIOLATION = "AUDIT_INTEGRITY_VIOLATION"
+
+    # --- Agent lifecycle: delegated identities (sub-agents, ephemeral, forks).
+    AGENT_SPAWNED = "AGENT_SPAWNED"
+    AGENT_SPAWN_REFUSED = "AGENT_SPAWN_REFUSED"
+    AGENT_EXPIRED = "AGENT_EXPIRED"
+
+    # --- Declared, NOT emitted ---
+    # A2A has no long-lived protocol session to terminate: each transaction
+    # is a single signed envelope, re-authorized on arrival. Global logout
+    # therefore needs nothing A2A-specific -- a locked-out sender's next
+    # envelope is denied by the PDP. Kept declared so the name is reserved.
+    A2A_SESSION_TERMINATED = "A2A_SESSION_TERMINATED"
 
 @dataclass(frozen=True)
 class Event:

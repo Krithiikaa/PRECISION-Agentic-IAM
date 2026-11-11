@@ -48,6 +48,7 @@ class AgentType(str, enum.Enum):
     FRAUD = "FRAUD"
     DECISION = "DECISION"
     HELPER = "HELPER"
+    DOCUMENT_VERIFICATION = "DOCUMENT_VERIFICATION"
 
 
 class KeyStatus(str, enum.Enum):

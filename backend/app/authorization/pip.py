@@ -53,7 +53,7 @@ from app.core.logging import get_logger
 from app.credentials.vc import credential_claims, specific_type
 from app.credentials.verifier import CredentialVerifier
 from app.db.models.agent import AgentStatus
-from app.db.models.credential import Credential
+from app.db.models.credential import Credential, CredentialStatus, CredentialStatusValue
 from app.db.repositories.agents import AgentRepository
 from app.hitl.artifact import ApprovalBinding
 from app.hitl.service import ApprovalFact, ApprovalService
@@ -62,15 +62,18 @@ from app.jit.grant import JITBinding
 from app.jit.service import JITFact, JITService
 from app.protocols.a2a.service import A2AFact
 from app.protocols.mcp.service import MCPFact
+from app.sessions.sss import SessionStateSynchronizer
+from app.trust.engine import TrustEngine
 
 log = get_logger("authz.pip")
 
 # Attributes no phase of this system computes yet. Named explicitly so policy
 # and auditors can tell "not implemented" from "absent for this request".
 UNAVAILABLE_ATTRIBUTES = {
-    "trust_score": "Phase 10 owns the trust engine; no score is computed anywhere yet",
-    "session": "Phase 9 owns the Session Authority; there is no session state",
-    "anomaly": "Phase 10 owns anomaly detection",
+    # Trust and session state ARE collected now (see `trust` and `session`).
+    # What remains unavailable is a learned model: anomaly detection is
+    # rule-based and reaches policy only through the trust score.
+    "ml_anomaly_score": "anomaly detection is rule-based; no ML model is built",
 }
 
 
@@ -107,9 +110,14 @@ class PIPContext:
     credentials: list[CredentialFact] = field(default_factory=list)
     resource: dict[str, Any] = field(default_factory=dict)
     environment: dict[str, Any] = field(default_factory=dict)
-    # Explicitly null. See UNAVAILABLE_ATTRIBUTES.
-    trust_score: None = None
-    session: None = None
+    # The Trust & Risk Engine's verdict: {score, level, active_signals}.
+    # Computed live from unexpired signals, never read from the caller.
+    trust: dict[str, Any] = field(default_factory=dict)
+    # The Session State Synchronizer ledger: {state, version, incident_id}.
+    # ACTIVE when the agent's global session was never changed -- a fact,
+    # not a permissive default: security/session.rego denies only on the
+    # lockout state, and a missing row genuinely means no lockout exists.
+    session: dict[str, Any] = field(default_factory=dict)
     # Phase 5. No longer null: the approval service establishes a VERDICT about
     # any human approval bound to this request, exactly as the Phase 2 verifier
     # does for credentials. Absent means "no approval applies to this request",
@@ -157,7 +165,10 @@ class PIPContext:
             "verified_capabilities": self.verified_capabilities,
             "resource": self.resource,
             "environment": self.environment,
-            "trust_score": self.trust_score,
+            "trust": self.trust,
+            # Kept for readers of earlier decision logs, which carried a
+            # (then always-null) `trust_score` key.
+            "trust_score": self.trust.get("score") if self.trust else None,
             "session": self.session,
             "approval": self.approval,
             "jit": self.jit,
@@ -186,6 +197,9 @@ class PolicyInformationPoint:
         # The Phase 6 mandate service, used the same way: it establishes the
         # verdict about a grant; nothing here re-derives one.
         self.jit = JITService(session, keystore, self.settings)
+        # Trust and session state: read-only here. The PIP never writes.
+        self.trust = TrustEngine(session, self.settings)
+        self.sss = SessionStateSynchronizer(session, self.settings)
 
     async def collect(
         self,
@@ -243,13 +257,25 @@ class PolicyInformationPoint:
             "did": agent.did,
             "type": request.subject.type,
             "status": agent.status.value,
-            "active": agent.status == AgentStatus.ACTIVE,
+            # An identity past its expiry is inactive the moment it expires,
+            # not when the lifecycle sweep next terminates it (paper R-61).
+            "active": agent.status == AgentStatus.ACTIVE and not (
+                agent.expires_at is not None
+                and agent.expires_at <= datetime.now(timezone.utc)),
+            "expires_at": agent.expires_at.isoformat() if agent.expires_at else None,
             "agent_type": agent.agent_type.value if agent.agent_type else None,
             "controller": agent.controller_did,
             # What the agent DECLARES about itself. Never authorisation
             # evidence -- an agent can claim any capability. Present so policy
             # can compare declaration against attestation if it wants to.
             "declared_capabilities": list(agent.capabilities or []),
+            # Phase 12. A delegated identity's authority is derived from its
+            # parent's, so the chain is part of its CURRENT trust state.
+            # Containment cascades to children, but suspension, termination,
+            # expiry or a lockout of a parent by any other route did not --
+            # the child kept working. Gathered here; decided by
+            # security/session.rego.
+            "delegation": await self._delegation_fact(agent),
         }
 
         # --- credentials, verified live ------------------------------------
@@ -265,9 +291,39 @@ class PolicyInformationPoint:
             jit=await self._jit_fact(request),
             a2a=a2a_fact.to_dict(),
             mcp=mcp_fact.to_dict(),
+            trust=(await self.trust.assess(agent.did)).to_fact(),
+            session=await self.sss.fact(agent.did),
         )
         context.collection_ms = (time.perf_counter() - started) * 1000
         return context
+
+    async def _delegation_fact(self, agent: Any) -> dict[str, Any]:
+        """Every ancestor's status, expiry and session state, read now."""
+        from app.db.models.agent import Agent
+        from app.db.models.security import SessionState
+
+        now = datetime.now(timezone.utc)
+        ancestors: list[dict[str, Any]] = []
+        parent_id, broken = agent.parent_agent_id, False
+        while parent_id is not None and len(ancestors) < 8:
+            parent = (await self.session.execute(
+                select(Agent).where(Agent.id == parent_id))).scalar_one_or_none()
+            if parent is None:
+                ancestors.append({"did": None, "active": False, "detail": "missing parent"})
+                broken = True
+                break
+            session_state = (await self.sss.fact(parent.did)).get("state")
+            active = (parent.status == AgentStatus.ACTIVE
+                      and not (parent.expires_at is not None and parent.expires_at <= now)
+                      and session_state != SessionState.TERMINATED_IMMEDIATE_SECURITY_LOCKOUT.value)
+            ancestors.append({"did": parent.did, "status": parent.status.value,
+                              "session": session_state, "active": active})
+            broken = broken or not active
+            parent_id = parent.parent_agent_id
+        if parent_id is not None and len(ancestors) >= 8:
+            broken = True       # deeper than delegation ever permits: refuse
+        return {"depth": len(ancestors), "ancestors": ancestors,
+                "chain_active": not broken}
 
     async def _approval_fact(self, request: AuthorizationRequest) -> dict[str, Any]:
         """What is true about a human approval for THIS request.
@@ -322,38 +378,57 @@ class PolicyInformationPoint:
         a second verification row per policy evaluation. The `request_id`
         carried on the authorization event is what ties the two together.
         """
-        stmt = select(Credential).where(Credential.subject_did == request.subject.did)
+        # PERFORMANCE DEFECT, FOUND UNDER LOAD: this verified EVERY credential
+        # the subject had ever held. Seeding is cumulative, so after months of
+        # demos risk-001 held 476 (244 revoked, most of the rest expired) and
+        # one decision cost ~3 s -- long enough to outlive a 2-second JIT
+        # mandate before it could be used.
+        #
+        # Now: verify the credentials the STATUS TABLE says are live first.
+        # If any of them verifies, those are the facts. Only if NONE does is
+        # the full history verified, because that is the only case in which
+        # policy reads invalid credentials (credential_state.rego's
+        # CREDENTIAL_EXPIRED / REVOKED / INVALID reasons all require
+        # `no_valid_credential`). Decisions are therefore identical.
+        #
+        # Nothing is trusted from the status table: every candidate still goes
+        # through the full Phase 2 verifier (signature, issuer, status, expiry).
+        # The table only decides the ORDER in which verification is attempted.
+        base = select(Credential).where(Credential.subject_did == request.subject.did)
         if request.credentials:
             # An offered id is a CLAIM. It narrows which credentials are
             # considered; it never substitutes for verifying them.
-            stmt = stmt.where(Credential.credential_id.in_(request.credentials))
-        result = await self.session.execute(stmt)
-        records = list(result.scalars().unique().all())
+            base = base.where(Credential.credential_id.in_(request.credentials))
+        live = (base.join(CredentialStatus, CredentialStatus.credential_id == Credential.credential_id)
+                .where(CredentialStatus.status == CredentialStatusValue.ACTIVE,
+                       Credential.expires_at > datetime.now(timezone.utc)))
+        candidates = list((await self.session.execute(live)).scalars().unique().all())
+        facts = [await self._fact(record, request) for record in candidates]
+        if any(f.valid for f in facts):
+            return facts
+        records = list((await self.session.execute(base)).scalars().unique().all())
+        return [await self._fact(record, request) for record in records]
 
-        facts: list[CredentialFact] = []
-        for record in records:
-            report = await self.verifier.verify(
-                record.document,
-                # Binds the credential to the subject actually asking. A
-                # credential issued to another agent cannot be borrowed.
-                expected_subject=request.subject.did,
-                verifier="pdp-pip",
-                request_id=request.request_id,
-                record_event=False,
-            )
-            facts.append(
-                CredentialFact(
-                    credential_id=record.credential_id,
-                    credential_type=specific_type(record.document),
-                    valid=report.valid,
-                    reason=report.reason,
-                    status=report.status,
-                    issuer=report.issuer,
-                    expires_at=report.expires_at,
-                    claims=credential_claims(record.document),
-                )
-            )
-        return facts
+    async def _fact(self, record: Credential, request: AuthorizationRequest) -> CredentialFact:
+        report = await self.verifier.verify(
+            record.document,
+            # Binds the credential to the subject actually asking. A
+            # credential issued to another agent cannot be borrowed.
+            expected_subject=request.subject.did,
+            verifier="pdp-pip",
+            request_id=request.request_id,
+            record_event=False,
+        )
+        return CredentialFact(
+            credential_id=record.credential_id,
+            credential_type=specific_type(record.document),
+            valid=report.valid,
+            reason=report.reason,
+            status=report.status,
+            issuer=report.issuer,
+            expires_at=report.expires_at,
+            claims=credential_claims(record.document),
+        )
 
     def _resource(self, request: AuthorizationRequest) -> dict[str, Any]:
         """The resource, with its MATERIAL ATTRIBUTES read server-side.

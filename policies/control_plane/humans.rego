@@ -50,6 +50,16 @@ human_roles contains role if {
 
 has_human_role(role) if role in human_roles
 
+# --- Loan workflow submission ----------------------------------------------
+# A loan officer puts a customer's application into the agent workflow. The
+# officer becomes the officer of record, so maker-checker later refuses that
+# same person approving it.
+allow contains object.union(humans, {"reason": "LOAN_OFFICER_MAY_SUBMIT"}) if {
+	principal_is_human
+	input.operation == "loan_workflow_submit"
+	has_human_role("LOAN_OFFICER")
+}
+
 # --- IAM administration (S-7) ---------------------------------------------
 # The identity control plane: creating and terminating agents, minting and
 # revoking credentials. Unauthenticated, these let any caller mint itself a
@@ -62,6 +72,14 @@ iam_admin_operations := {
 	"credential_present",
 	"identity_sign",
 	"audit_ingest",
+	# Session Authority (kill switch). Reinstating additionally requires a
+	# DIFFERENT person from the one who contained -- enforced by the
+	# Session Authority itself, because it needs the incident record.
+	"incident_contain",
+	"incident_reinstate",
+	"anomaly_scan",
+	"agent_spawn",
+	"agent_profile_publish",
 }
 
 allow contains object.union(humans, {"reason": "HUMAN_IAM_ADMIN"}) if {

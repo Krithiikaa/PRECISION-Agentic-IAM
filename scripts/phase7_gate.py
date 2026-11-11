@@ -689,7 +689,12 @@ for authority_did, label in (
 # ---------------------------------------------------------------------------
 print("\n 12. AUDIT CORRELATION")
 # ---------------------------------------------------------------------------
-status, events = call("GET", "/api/v1/audit?limit=1000", principal=cp_sign.IDENTITY_ADMIN)
+# Asked for BY request id (the audit API's correlation filter) rather than
+# fished out of the newest 1000 events: under rate-limit pacing the gate runs
+# longer, and the arc fell outside that window -- the trail was intact, the
+# query was too narrow.
+status, events = call("GET", f"/api/v1/audit?request_id=a2a-{HAPPY_TXN}&limit=200",
+                      principal=cp_sign.IDENTITY_ADMIN)
 trail = [e for e in events if e.get("request_id") == f"a2a-{HAPPY_TXN}"]
 types = {e["event_type"] for e in trail}
 for expected in ("A2A_REQUEST", "A2A_SIGNATURE_VERIFIED",

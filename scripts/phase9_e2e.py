@@ -89,7 +89,8 @@ def call(method, path, body=None, *, principal=None, headers=None, timeout=30,
     """One HTTP call. `principal` signs it as a control-plane request."""
     url = path if path.startswith("http") else f"{base or API}{path}"
     if principal:
-        payload, hdrs = cp_sign.signed(principal, method, path, body)
+        # The server verifies the proof over the path WITHOUT its query string.
+        payload, hdrs = cp_sign.signed(principal, method, path.split("?", 1)[0], body)
     else:
         payload = json.dumps(body).encode() if body is not None else None
         hdrs = {"Content-Type": "application/json"} if payload else {}
@@ -240,13 +241,13 @@ print("\n  SCENARIO A -- a successful agent operation, identity to audit")
 # Phase 1 identity -> Phase 2 credential -> Phase 3 discovery ->
 # Phase 4 authorization -> enforcement -> audit.
 
-status, agents = call("GET", "/api/v1/agents?status=ACTIVE")
+status, agents = call("GET", "/api/v1/agents?status=ACTIVE", principal=cp_sign.IDENTITY_ADMIN)
 check("the registry serves active agents", status, 200)
 subject = next((a for a in (agents or []) if a["did"] == AGENT), None)
 check("the Phase 1 identity exists and is ACTIVE",
       bool(subject) and subject["status"], "ACTIVE")
 
-status, inventory = call("GET", f"/api/v1/agents/{subject['id']}")
+status, inventory = call("GET", f"/api/v1/agents/{subject['id']}", principal=cp_sign.IDENTITY_ADMIN)
 active_creds = [c for c in (inventory or {}).get("credentials", [])
                 if c["status"] == "ACTIVE"]
 check("it holds at least one ACTIVE credential", len(active_creds) > 0, True)
@@ -273,7 +274,7 @@ check("the PDP allowed it", (decision or {}).get("decision", {}).get("decision")
 check("the tool executed", (decision or {}).get("executed"), True)
 check("a result came back", bool((decision or {}).get("result")), True)
 
-status, events = call("GET", f"/api/v1/audit?agent_did={AGENT}&limit=400")
+status, events = call("GET", f"/api/v1/audit?agent_did={AGENT}&limit=400", principal=cp_sign.IDENTITY_ADMIN)
 rows = events if isinstance(events, list) else (events or {}).get("items", [])
 recorded = {e.get("event_type") for e in rows
             if e.get("request_id") == request_id}
@@ -293,8 +294,10 @@ print("\n  SCENARIO B -- revoking a credential stops the next operation")
 # capability credentials. Revoking one and expecting a denial would be a test
 # that fails for the right reason only by accident -- with two left, ALLOW is
 # the CORRECT answer, and a test asserting otherwise would be asserting a bug.
+# Signed since Phase 10 made the credential inventory `credential_read`. The
+# DID is sent unencoded so the signed path is the path the server verifies.
 status, held = call(
-    "GET", f"/api/v1/agents/did/{urllib.parse.quote(AGENT, safe='')}/credentials")
+    "GET", f"/api/v1/agents/did/{AGENT}/credentials", principal=cp_sign.IDENTITY_ADMIN)
 inventory = held if isinstance(held, list) else (held or {}).get("items", [])
 grantors = [
     c for c in inventory

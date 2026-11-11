@@ -99,6 +99,55 @@ CREDENTIAL_SET = [
         "allowed_resources": ["specialist_findings"],
         "purpose": "loan_assessment",
     }, 3600),
+    # --- End-to-end loan workflow (blueprint steps 5-9) ---------------
+    # ADDED alongside the credentials above, never replacing them: earlier
+    # gates assert on those. Each specialist gets exactly one credential for
+    # exactly its own resource, for the workflow's `loan_assessment` purpose;
+    # policies/loan/workflow.rego bounds each to its own row.
+    ("kyc-001", BANK, "AgentCapabilityCredential", {
+        "capability": "kyc_verification",
+        "allowed_actions": ["READ_KYC_RECORD"],
+        "allowed_resources": ["kyc_records"],
+        "purpose": "loan_assessment",
+    }, 3600),
+    ("fraud-001", BANK, "AgentCapabilityCredential", {
+        "capability": "fraud_detection",
+        "allowed_actions": ["READ_FRAUD_SIGNALS"],
+        "allowed_resources": ["fraud_signals"],
+        "purpose": "loan_assessment",
+    }, 3600),
+    # risk-002 is the workflow's RISK ASSESSMENT agent; risk-001 remains the
+    # CREDIT ANALYSIS agent. Distinct agents, distinct credentials.
+    ("risk-002", BANK, "AgentCapabilityCredential", {
+        "capability": "affordability_assessment",
+        "allowed_actions": ["ASSESS_AFFORDABILITY"],
+        "allowed_resources": ["risk_models"],
+        "purpose": "loan_assessment",
+    }, 3600),
+    ("docs-001", BANK, "AgentCapabilityCredential", {
+        "capability": "document_verification",
+        "allowed_actions": ["VERIFY_DOCUMENTS"],
+        "allowed_resources": ["loan_documents"],
+        "purpose": "loan_assessment",
+    }, 3600),
+    # The COORDINATOR's access to the workflow queue. Claiming and
+    # recording are protected tools, so the coordinator needs a credential
+    # for them like any other agent; it names no customer resource.
+    ("coordinator-001", BANK, "AgentCapabilityCredential", {
+        "capability": "loan_workflow_coordination",
+        "allowed_actions": ["CLAIM_WORKFLOW", "RECORD_OUTCOME"],
+        "allowed_resources": ["loan_workflows"],
+        "purpose": "loan_assessment",
+    }, 3600),
+    # The DECISION agent records the outcome. Amount bands and human
+    # approval are policy (loan/amount.rego, security/sensitive.rego); this
+    # credential is necessary and never sufficient above the agent's band.
+    ("decision-001", BANK, "AgentCapabilityCredential", {
+        "capability": "loan_decision",
+        "allowed_actions": ["APPROVE_LOAN"],
+        "allowed_resources": ["loan_applications"],
+        "purpose": "loan_decision",
+    }, 3600),
 ]
 
 

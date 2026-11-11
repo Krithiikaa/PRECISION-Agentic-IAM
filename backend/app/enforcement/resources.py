@@ -73,6 +73,19 @@ _CREDIT_RECORDS: dict[str, dict[str, Any]] = {
         "oldest_account_years": 4,
         "synthetic": True,
     },
+    # The loan workflow's adverse case: a sanctions hit and HIGH fraud signals
+    # in the simulated KYC and fraud adapters (app/banking/adapters.py).
+    "customer-666": {
+        "customer_id": "customer-666",
+        "credit_score": 701,
+        "score_band": "FAIR",
+        "open_accounts": 2,
+        "total_balance_gbp": 3100,
+        "utilisation_pct": 22,
+        "delinquencies_24m": 0,
+        "oldest_account_years": 1,
+        "synthetic": True,
+    },
 }
 
 # Synthetic payroll records. Present ONLY so an unauthorised resource exists to
@@ -201,8 +214,27 @@ def known_loan_applications() -> list[str]:
     return sorted(_LOAN_APPLICATIONS)
 
 
+def _durable_application(application_id: str | None, *, fresh: bool) -> dict[str, Any] | None:
+    """A workflow-created application from PostgreSQL (Phase 12), or None."""
+    from app.banking import store
+
+    if not store.is_durable(application_id):
+        return None
+    facts = store.facts(application_id, fresh=fresh)
+    if facts is None:
+        return None
+    # Mutable fields come only from a fresh database read. If the row is not
+    # yet visible to a new connection they are reported as unavailable,
+    # never guessed.
+    return {"status": "UNAVAILABLE", "risk_band": "UNASSESSED", **facts,
+            "amount_display": format_inr(facts["amount_inr"]),
+            "disclaimer": store.APPLICATION_DISCLAIMER, "durable": True}
+
+
 def get_loan_application(application_id: str) -> dict[str, Any]:
     record = _LOAN_APPLICATIONS.get(application_id)
+    if record is None:
+        record = _durable_application(application_id, fresh=True)
     if record is None:
         raise ResourceNotFoundError(f"No loan application {application_id!r}")
     return dict(record)
@@ -241,7 +273,11 @@ def material_attributes(
     perfectly valid records of what somebody agreed to.
     """
     if resource_type == LOAN_APPLICATIONS and resource_id:
-        record = _LOAN_APPLICATIONS.get(resource_id)
+        # Phase 12: a workflow application's amount and officer of record are
+        # IMMUTABLE facts read from PostgreSQL (cached once loaded). The demo
+        # fixtures below are answered exactly as before.
+        record = (_LOAN_APPLICATIONS.get(resource_id)
+                  or _durable_application(resource_id, fresh=False))
         if record is None:
             return {
                 "available": False,
@@ -330,8 +366,9 @@ def loan_application_status(application_id: str) -> str | None:
     Lets a negative test assert the resource genuinely did not change, rather
     than inferring it from a response body.
     """
-    record = _LOAN_APPLICATIONS.get(application_id)
-    return record["status"] if record else None
+    record = (_LOAN_APPLICATIONS.get(application_id)
+              or _durable_application(application_id, fresh=True))
+    return record.get("status") if record else None
 
 
 # The pristine demo set, kept so `reset_loan_applications` restores AMOUNTS as
@@ -346,6 +383,10 @@ def reset_loan_applications() -> None:
     """Restore the demo applications. Used between tests."""
     for key, pristine in _PRISTINE_LOAN_APPLICATIONS.items():
         _LOAN_APPLICATIONS[key] = dict(pristine)
+    # Applications created by the loan workflow are not part of the pristine
+    # demo set; drop them so tests do not see each other's submissions.
+    for key in [k for k in _LOAN_APPLICATIONS if k not in _PRISTINE_LOAN_APPLICATIONS]:
+        del _LOAN_APPLICATIONS[key]
 
 
 # --- Payment instructions (Phase 7) ----------------------------------------

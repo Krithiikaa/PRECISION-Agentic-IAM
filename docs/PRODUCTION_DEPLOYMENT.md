@@ -106,6 +106,40 @@ What an operator must provide:
    trust store, and a fetch failure is an **authentication failure**, never
    permission to skip the check.
 
+### Browser origins (Phase 12)
+
+`CORS_ALLOWED_ORIGINS` is the single allow-list for the IAM API, the ANS and
+every agent process. In production list each console origin explicitly
+(`https://console.bank.example`); `*` and malformed entries refuse to start.
+An unlisted origin receives no CORS headers, so browsers withhold the
+response. CORS is not authorization: every route is still guarded.
+
+### mTLS and certificates — BLOCKED_EXTERNAL
+
+**Integration procedure** once certificates exist: (1) issue a server
+certificate per service from the organisation's PKI; (2) terminate TLS at the
+proxy for browsers and Keycloak; (3) for service-to-service mTLS place a
+sidecar or mesh (e.g. Envoy) in front of OPA, PostgreSQL and Redis requiring
+client certificates; (4) set `DATABASE_URL ...?sslmode=verify-full` and the
+https URLs `ENV=production` already demands.
+**Evidence required:** `openssl s_client -connect <host>:443 -verify_return_error`
+succeeds for each endpoint; a connection to OPA/PostgreSQL *without* a client
+certificate is refused; `GET /ready` reports every dependency healthy over TLS.
+Until that evidence exists the status is **BLOCKED_EXTERNAL**.
+
+### HSM / KMS — BLOCKED_EXTERNAL
+
+All signing goes through the `KeyStore` interface (`app/identity/keys.py`:
+`generate_key`, `get_public_key`, `sign`, `exists`, `delete`) and private keys
+never leave it. **Integration procedure:** implement a `KeyStore` backed by
+the provider's sign API (PKCS#11 or cloud KMS, Ed25519 keys, non-exportable),
+select it in `build_keystore()`, and move `KEYSTORE_MASTER_KEY` (also the
+audit-MAC root) into the KMS. **Evidence required:** key attributes show
+non-exportable; `tests/test_identity_crypto.py`, the rotation tests and
+`tests/test_audit_integrity.py` pass against the HSM-backed store; an audit
+of the KMS shows signing calls from the IAM API identity only. No HSM is
+simulated here.
+
 ### Internal trust model
 
 Within the compose network, `iam-api` → `opa`, `postgres`, `redis` and

@@ -4,10 +4,18 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field
 
+from app.agents.delegation import (
+    DelegatedScope,
+    DelegationKind,
+    DelegationRefused,
+    DelegationService,
+    SpawnRequest,
+)
 from app.agents.registry import AgentSpec
-from app.api.deps import RegistryDep, SessionDep
+from app.api.deps import KeyStoreDep, RegistryDep, SessionDep
 from app.api.schemas import (
     AgentCredentialSummary,
     AgentResponse,
@@ -191,3 +199,103 @@ async def change_status(
 async def agent_audit(agent_id: uuid.UUID, registry: RegistryDep, limit: int = 100) -> list[dict]:
     agent = await registry.get_agent_by_id(agent_id)
     return await registry.audit.query(agent_did=agent.did, limit=limit)
+
+
+# --- Delegated identities (CSA paper Table 3, R-63/64/65, R-94) -----------
+class DelegatedScopeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    capability: str = Field(min_length=1, max_length=64)
+    actions: list[str] | None = Field(default=None, max_length=32)
+    resources: list[str] | None = Field(default=None, max_length=32)
+
+
+class SpawnIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: DelegationKind
+    task: str = Field(min_length=3, max_length=500)
+    scopes: list[DelegatedScopeIn] = Field(default_factory=list, max_length=16)
+    ttl_seconds: int | None = Field(default=None, ge=30)
+    name: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/did/{did}/delegations", status_code=status.HTTP_201_CREATED,
+             dependencies=[Depends(ControlPlaneGuard("agent_spawn", target=path_param("did")))])
+async def spawn_delegated_agent(did: str, body: SpawnIn, request: Request,
+                                session: SessionDep, keystore: KeyStoreDep) -> dict:
+    """Create a sub-agent, ephemeral agent or fork of `did`.
+
+    The child gets its own DID and key, a provenance credential naming its
+    parent, and capability credentials that are narrowing copies of the
+    parent's VERIFIED credentials. A refusal is committed (it is audited and
+    feeds the anomaly detector) before the error is returned.
+    """
+    service = DelegationService(session, keystore)
+    try:
+        result = await service.spawn(SpawnRequest(
+            parent_did=did, kind=body.kind, task=body.task,
+            scopes=[DelegatedScope(s.capability, s.actions, s.resources) for s in body.scopes],
+            ttl_seconds=body.ttl_seconds, name=body.name,
+        ), requested_by=request.state.control_plane_principal.did)
+    except DelegationRefused:
+        await session.commit()
+        raise
+    return result.to_dict()
+
+
+@router.get("/did/{did}/lineage", dependencies=[Depends(
+    ControlPlaneGuard("identity_read", target=path_param("did")))])
+async def lineage(did: str, session: SessionDep, keystore: KeyStoreDep) -> dict:
+    """Ancestors and children of an agent: the delegation chain, both ways."""
+    return await DelegationService(session, keystore).lineage(did)
+
+
+class ProfileIn(BaseModel):
+    """The inputs to an Agent ID profile. The SERVER computes the model hash."""
+    model_config = ConfigDict(extra="forbid")
+    creator: str = Field(max_length=255)
+    deployer: str = Field(max_length=255)
+    model: str | None = Field(default=None, max_length=128)
+    model_digest: str | None = Field(default=None, max_length=128)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    scope_of_behavior: dict = Field(default_factory=dict)
+    toolset: list[str] = Field(default_factory=list, max_length=64)
+    expected_outcomes: str | None = Field(default=None, max_length=1000)
+    limitations: str | None = Field(default=None, max_length=1000)
+
+
+@router.put("/did/{did}/profile", dependencies=[Depends(
+    ControlPlaneGuard("agent_profile_publish", target=path_param("did")))])
+async def publish_profile(did: str, body: ProfileIn, registry: RegistryDep) -> dict:
+    """Publish the rich Agent ID profile (CSA paper section 3.2) into the DID Document."""
+    from app.core.config import get_settings
+    from app.identity.profile import build_agent_profile
+
+    agent = await registry.get_agent(did)
+    settings = get_settings()
+    profile = build_agent_profile(
+        creator=body.creator, deployer=body.deployer, owner=agent.owner,
+        controller=agent.controller_did, software_version=settings.agent_software_version,
+        model=body.model, model_digest=body.model_digest, system_prompt=body.system_prompt,
+        scope_of_behavior=body.scope_of_behavior, toolset=body.toolset,
+        created_at=agent.created_at, expires_at=agent.expires_at,
+        expected_outcomes=body.expected_outcomes, limitations=body.limitations)
+    version = await registry.update_profile(did, profile, reason="profile published")
+    return {"did": did, "document_version": version,
+            "model_hash": profile["model"]["hash"]}
+
+
+class EndpointIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    endpoint: str = Field(pattern=r"^https?://[^\s]{3,500}$")
+
+
+@router.put("/did/{did}/endpoint", dependencies=[Depends(
+    ControlPlaneGuard("agent_status_change", target=path_param("did")))])
+async def update_endpoint(did: str, body: EndpointIn, registry: RegistryDep) -> dict:
+    """Set the agent's service endpoint in its DID Document.
+
+    Guarded as `agent_status_change`: redirecting where an agent is reached
+    is as consequential as suspending it, and it is the same administrator.
+    """
+    version = await registry.update_endpoint(did, body.endpoint, reason="endpoint updated")
+    return {"did": did, "endpoint": body.endpoint, "document_version": version}

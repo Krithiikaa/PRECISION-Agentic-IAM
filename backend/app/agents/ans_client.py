@@ -158,7 +158,13 @@ class ANSClient:
                 pass
             active = load() if load else 0
             ok = await self.heartbeat(active_tasks=active)
-            if not ok and self.state.registered:
+            # Re-register on ANY failed heartbeat, not only while we believe
+            # we are registered. FOUND during kill-switch testing: a contained
+            # agent's re-registration is (correctly) refused, which cleared the
+            # flag -- so after a human reinstated it, it never tried again and
+            # stayed undiscoverable. Every registration carries a fresh signed
+            # proof and the ANS decides, so retrying is safe.
+            if not ok:
                 log.info("ans_reregistering", did=self.did)
                 await self.register()
 

@@ -155,9 +155,16 @@ class TestEnforceEndpoint:
         # payment execution, which is the one an A2A instruction reaches --
         # and which no caller can ever NAME, because the AEM derives it from
         # the signed (action, resource_type) pair.
+        # The framework-completion increment added the end-to-end loan
+        # workflow: four specialist tools over SIMULATED adapters, each bound
+        # to its own resource type in loan/workflow.rego, and the
+        # coordinator's two workflow-queue tools.
         assert names == {"get_credit_profile", "get_payroll_record",
                          "approve_loan_application",
-                         "execute_payment_instruction"}
+                         "execute_payment_instruction",
+                         "get_kyc_record", "get_fraud_signals",
+                         "verify_loan_documents", "assess_loan_risk",
+                         "claim_next_loan_workflow", "record_loan_workflow_outcome"}
         for tool in tools:
             assert tool["protected"] is True
             assert tool["resource"] and tool["action"]

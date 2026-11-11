@@ -14,6 +14,10 @@ class ConflictError(AgenticIAMError):
     pass
 
 
+class ValidationError(AgenticIAMError):
+    """A request that is well-formed but not acceptable (HTTP 422)."""
+
+
 class KeyStoreError(AgenticIAMError):
     pass
 

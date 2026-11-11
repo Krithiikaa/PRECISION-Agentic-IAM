@@ -186,10 +186,14 @@ def describe(record, signoffs: list | None = None) -> dict[str, Any]:
 
 
 # --- public: what the browser needs to log in ------------------------------
-@router.get("/config", dependencies=[Depends(
-    ControlPlaneGuard("approval_read", target=fixed("approval_config")))])
+@router.get("/config")
 async def hitl_config(settings: SettingsDep) -> dict[str, Any]:
     """The OIDC parameters the console needs. Public, and carries no secret.
+
+    REGRESSION FIXED. Phase 10 put this behind `approval_read`, which made the
+    login bootstrap require a login: the console could not learn where
+    Keycloak is without already holding a token from it, so NO ONE could sign
+    in to the console after Phase 10. It is in PUBLIC_ROUTES with the reason.
 
     The console is a PUBLIC client using Authorization Code + PKCE, so there is
     nothing confidential to leak here -- these values are already visible in

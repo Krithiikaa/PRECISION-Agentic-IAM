@@ -43,6 +43,7 @@ from app.agents.definitions import get_definition            # noqa: E402
 from app.core.config import get_settings                     # noqa: E402
 from app.identity.did import build_agent_did, key_id         # noqa: E402
 from app.identity.keys import EncryptedFileKeyStore          # noqa: E402
+from app.identity.profile import model_hash                  # noqa: E402
 
 API = os.environ.get("IAM_API_URL", "http://localhost:8000")
 
@@ -53,6 +54,8 @@ DEMO_AGENTS = [
     # a real identity with a real key because RECEIVER BINDING is enforced by
     # requiring the submitter to hold this agent's private key.
     "payments-001",
+    # The loan workflow's DOCUMENT VERIFICATION agent (blueprint step 8).
+    "docs-001",
 ]
 
 
@@ -78,6 +81,66 @@ def call(method: str, path: str, body=None, principal: str | None = None):
         print(f"  CANNOT REACH {API}: {exc}")
         print("  Start the API first: scripts/run_local.sh")
         sys.exit(2)
+
+
+def ollama_digest(model: str) -> str | None:
+    """The weights digest the model runtime reports, or None if unreachable.
+
+    Never invented: when Ollama cannot be asked, the profile records null and
+    the hash still binds model name, prompt and software version.
+    """
+    base = os.environ.get("OLLAMA_BASE_URL", get_settings().ollama_base_url)
+    try:
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=3) as response:
+            for entry in json.loads(response.read()).get("models", []):
+                if entry.get("name") == model or entry.get("model") == model:
+                    return entry.get("digest")
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+    return None
+
+
+def publish_profile(slug: str, did: str) -> str:
+    """Publish the rich Agent ID profile (CSA paper section 3.2), if it changed."""
+    settings = get_settings()
+    definition = get_definition(slug)
+    model = settings.ollama_model
+    digest = ollama_digest(model)
+    wanted = model_hash(model=model, model_digest=digest,
+                        software_version=settings.agent_software_version,
+                        system_prompt=definition.system_prompt)
+    status, document = call("GET", f"/api/v1/agents/did/{did}/did-document")
+    current = (((document or {}).get("agentMetadata") or {}).get("profile") or {})
+    if status == 200 and ((current.get("model") or {}).get("hash") or {}).get("value") == wanted:
+        return "profile current"
+    status, body = call("PUT", f"/api/v1/agents/did/{did}/profile", {
+        "creator": settings.organization_did,
+        "deployer": cp_sign.IDENTITY_ADMIN,
+        "model": model,
+        "model_digest": digest,
+        "system_prompt": definition.system_prompt,
+        "scope_of_behavior": {"purpose": definition.purpose,
+                              "capabilities": list(definition.capabilities)},
+        "toolset": list(definition.planned_tools),
+    }, principal=cp_sign.IDENTITY_ADMIN)
+    if status != 200:
+        return f"profile NOT published (HTTP {status})"
+    return f"profile v{body.get('document_version')} published"
+
+
+def expected_endpoint(slug: str) -> str:
+    """Where the agent will be reached. Defaults to its definition's port,
+    which is what run_local.sh starts it on.
+
+    It used to default to NOTHING: provisioning read an
+    AGENT_PUBLIC_URL_<slug> variable no script set, so a freshly provisioned
+    agent had no service endpoint in its DID Document -- and discovery, which
+    cross-checks the ANS endpoint against the DID Document, could never
+    select it. Agents provisioned before Phase 5 had endpoints only because
+    they had registered themselves.
+    """
+    return os.environ.get(f"AGENT_PUBLIC_URL_{slug.replace('-', '_')}",
+                          f"http://localhost:{get_definition(slug).port}")
 
 
 def provision(slug: str) -> bool:
@@ -115,7 +178,14 @@ def provision(slug: str) -> bool:
                   f"for {did}.")
             print(f"             Refusing to re-point an existing DID at another key.")
             return False
-        print(f"  [ok]       {slug:<18s} already provisioned ({key_state} key)")
+        if not existing.get("endpoint"):
+            status, _ = call("PUT", f"/api/v1/agents/did/{did}/endpoint",
+                             {"endpoint": expected_endpoint(slug)},
+                             principal=cp_sign.IDENTITY_ADMIN)
+            print(f"  [repaired] {slug:<18s} endpoint was missing; set to "
+                  f"{expected_endpoint(slug)} (HTTP {status})")
+        print(f"  [ok]       {slug:<18s} already provisioned ({key_state} key); "
+              f"{publish_profile(slug, did)}")
         return True
 
     status, created = call("POST", "/api/v1/agents", {
@@ -124,14 +194,15 @@ def provision(slug: str) -> bool:
         "agent_type": definition.agent_type.value,
         "purpose": definition.purpose,
         "capabilities": list(definition.capabilities),
-        "endpoint": os.environ.get(f"AGENT_PUBLIC_URL_{slug.replace('-', '_')}"),
+        "endpoint": expected_endpoint(slug),
         "public_key_multibase": handle.public_key_multibase,
         "metadata": {"provisioned_by": cp_sign.IDENTITY_ADMIN,
                      "runtime": "agent-service"},
     }, principal=cp_sign.IDENTITY_ADMIN)
 
     if status in (200, 201):
-        print(f"  [created]  {slug:<18s} {created.get('did')}  ({key_state} key)")
+        print(f"  [created]  {slug:<18s} {created.get('did')}  ({key_state} key); "
+              f"{publish_profile(slug, did)}")
         return True
     reason = (created.get("detail") or {})
     reason = reason.get("reason") if isinstance(reason, dict) else created

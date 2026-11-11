@@ -9,7 +9,18 @@ RUN="$ROOT/.run"
 mkdir -p "$RUN"
 cd "$ROOT"
 
-AGENTS="coordinator-001:9001 kyc-001:9002 risk-001:9003 fraud-001:9004 decision-001:9005 risk-002:9006 risk-003:9007 payments-001:9008"
+# Every `python3` below (provisioning, the health-line formatter) must be the
+# venv's: the helper scripts import the backend, whose dependencies exist only
+# there. Relying on the system python3 worked only by accident on hosts that
+# happen to have pydantic et al. installed globally.
+if ! "$ROOT/backend/.venv/bin/python" -c "import fastapi" 2>/dev/null; then
+  echo "ABORT: backend/.venv is missing or broken. Run scripts/setup.sh first." >&2
+  exit 1
+fi
+export PATH="$ROOT/backend/.venv/bin:$PATH"
+[ -f "$ROOT/.env" ] || { echo "ABORT: no .env. Run scripts/setup.sh first." >&2; exit 1; }
+
+AGENTS="coordinator-001:9001 kyc-001:9002 risk-001:9003 fraud-001:9004 decision-001:9005 risk-002:9006 risk-003:9007 payments-001:9008 docs-001:9009"
 
 OCCUPIED=""
 for port in $ALL_PORTS; do
@@ -22,12 +33,16 @@ if [ -n "$OCCUPIED" ]; then
 fi
 
 echo "==> infrastructure"
-docker compose up -d postgres redis >/dev/null
-for _ in $(seq 1 60); do
-  docker compose exec -T postgres pg_isready -U "${POSTGRES_USER:-iam}" >/dev/null 2>&1 && break
-  sleep 1
-done
-echo "    postgres and redis ready"
+# OPA (the PDP) and Keycloak (human identities, MCP OAuth) are hard
+# dependencies of authorization and HITL, so they start here too. --wait blocks
+# on each container's healthcheck; Keycloak's first boot imports the realm and
+# can take a minute or two.
+if ! docker compose up -d --wait --wait-timeout 300 postgres redis opa keycloak >/dev/null; then
+  echo "    FAILED to bring up infrastructure:" >&2
+  docker compose ps >&2
+  exit 1
+fi
+echo "    postgres, redis, opa and keycloak healthy"
 
 set -a; . "$ROOT/.env"; set +a
 cd "$ROOT/backend"

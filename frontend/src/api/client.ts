@@ -31,8 +31,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     let detail = response.statusText;
+    let raw: Record<string, unknown> | null = null;
     try {
       const body = await response.json();
+      raw = body;
       detail = body.detail ?? body.error ?? detail;
     } catch {
       /* keep statusText */
@@ -46,10 +48,75 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
         ? `${structured.reason}${structured.detail ? ` - ${structured.detail}` : ""}`
         : (structured.detail ?? structured.error ?? response.statusText);
     }
-    throw new Error(`${response.status}: ${detail}`);
+    throw new ApiError(response.status, String(detail), raw);
   }
   return response.json() as Promise<T>;
 }
+
+/** A refusal or failure from the server, with its HTTP status preserved so a
+ *  view can tell "sign in" (401) and "your role may not" (403) apart from an
+ *  outage -- and say which, instead of a generic error. */
+export class ApiError extends Error {
+  /** `body` is the server's full JSON refusal (e.g. a refused reinstatement
+   *  carries its `revalidation` checks). Shown as received, never inferred. */
+  constructor(public status: number, public detail: string,
+              public body: Record<string, unknown> | null = null) {
+    super(`${status}: ${detail}`);
+  }
+}
+
+/** The bearer token currently attached to requests (null when signed out). */
+export function currentBearer(): string | null {
+  return bearer;
+}
+
+/** Generic, authenticated request against the IAM API. */
+export function http<T>(path: string, init?: RequestInit): Promise<T> {
+  return request<T>(path, init);
+}
+
+// --- Security operations and the loan workflow (loosely typed: these views
+// render what the server returns and never infer permission from it). -----
+export type Json = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+
+export const security = {
+  trust: () => request<Json>("/api/v1/security/trust"),
+  trustFor: (did: string) => request<Json>(`/api/v1/security/trust/${did}`),
+  alerts: () => request<Json[]>("/api/v1/security/alerts?limit=50"),
+  incidents: () => request<Json[]>("/api/v1/security/incidents"),
+  impact: (did: string) => request<Json>(`/api/v1/security/impact/${did}`),
+  incident: (incidentId: string) => request<Json>(`/api/v1/security/incidents/${incidentId}`),
+  contain: (agentDid: string, justification: string, revokeCredentials: boolean) =>
+    request<Json>("/api/v1/security/incidents", {
+      method: "POST",
+      body: JSON.stringify({ agent_did: agentDid, justification,
+                             revoke_credentials: revokeCredentials }),
+    }),
+  reinstate: (incidentId: string, review: string) =>
+    request<Json>(`/api/v1/security/incidents/${incidentId}/reinstate`, {
+      method: "POST", body: JSON.stringify({ review }),
+    }),
+};
+
+export const workflows = {
+  list: () => request<Json[]>("/api/v1/loan-workflows"),
+  /** Phase 12: the Idempotency-Key is enforced by the SERVER (unique per
+   *  officer); the console only chooses when a submission is "the same one". */
+  submit: (body: Json, idempotencyKey: string) =>
+    request<Json>("/api/v1/loan-workflows", {
+      method: "POST", body: JSON.stringify(body),
+      headers: { "Idempotency-Key": idempotencyKey },
+    }),
+  transitions: (workflowId: string) =>
+    request<Json[]>(`/api/v1/loan-workflows/${encodeURIComponent(workflowId)}/transitions`),
+};
+
+// --- Phase 12: audit integrity (server-side verification; the console only
+// renders the verdict it is given). -------------------------------------------
+export const auditIntegrity = {
+  verify: () => request<Json>("/api/v1/audit/integrity"),
+  checkpoints: (limit = 20) => request<Json>(`/api/v1/audit/integrity/checkpoints?limit=${limit}`),
+};
 
 export const api = {
   agents: () => request<Agent[]>("/api/v1/agents"),

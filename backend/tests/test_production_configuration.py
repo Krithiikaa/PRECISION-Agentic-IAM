@@ -45,6 +45,7 @@ SECURE = {
     "ratelimit_enabled": True,
     "ratelimit_redis_policy": "fail_closed",
     "cors_allowed_origins": "https://console.example.com",
+    "anomaly_detector_enabled": True,
 }
 
 
@@ -246,3 +247,16 @@ class TestAudienceSeparation:
     def test_they_still_differ_in_production(self):
         settings = production()
         assert settings.oidc_audience != settings.mcp_audience
+
+
+class TestGateHarnessSwitchesCannotReachProduction:
+    """The security gates run the API with the anomaly detector off, because
+    they attack as one agent and then expect it to keep working. That switch
+    belongs to the test harness; production must refuse it outright."""
+
+    def test_production_refuses_a_disabled_detector(self):
+        with pytest.raises(ValidationError, match="ANOMALY_DETECTOR_ENABLED"):
+            production(anomaly_detector_enabled=False)
+
+    def test_development_may_disable_it_for_the_gate_harness(self):
+        assert Settings(anomaly_detector_enabled=False).anomaly_detector_enabled is False

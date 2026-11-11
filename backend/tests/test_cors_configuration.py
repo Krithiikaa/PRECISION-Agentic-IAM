@@ -1,179 +1,124 @@
-"""CORS configuration (Phase 10).
+"""Phase 12: browser origins are configuration, validated, and the same everywhere.
 
-WHAT CORS IS, AND WHAT IT IS NOT. It restricts which BROWSER ORIGINS may
-READ a response. It does nothing whatsoever about a direct HTTP call — curl
-ignores it, and so does every script. That is why every sensitive route in
-this service is independently guarded (`test_route_security_inventory.py`)
-and why nothing here is relied on as an access control.
+Before: the IAM API read CORS_ALLOWED_ORIGINS, but the ANS and all nine agent
+processes hard-coded two localhost origins with `allow_methods=["*"]` and
+`allow_headers=["*"]`. Changing the console's origin for a deployment left
+ten services answering the old one.
 
-Narrowing it still matters: it reduces what a hostile page can do with a
-signed-in operator's session. No more than that, and this file does not
-claim more.
-
-WHAT PHASE 10 CHANGED. `main.py` hardcoded two localhost origins with
-`allow_methods=["*"]` and `allow_headers=["*"]`. That failed SAFE — a real
-console simply would not load — but it could not be deployed, and the
-wildcards were wider than anything needed.
+CORS is not authorization. These tests assert only what CORS is for: which
+browser origins may READ a response.
 """
 from __future__ import annotations
 
-import base64
-import os
-
 import pytest
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
 
-pytestmark = pytest.mark.integration
-
-REAL_KEY = base64.b64encode(os.urandom(32)).decode()
-
-PRODUCTION = {
-    "env": "production",
-    "keystore_master_key": REAL_KEY,
-    "opa_url": "https://opa.internal",
-    "keycloak_base_url": "https://sso.example.com",
-    "keycloak_issuer": "https://sso.example.com/realms/agentic-iam",
-    "mcp_resource_uri": "https://api.example.com/mcp",
-    "api_public_url": "https://api.example.com",
-    "ratelimit_enabled": True,
-    "ratelimit_redis_policy": "fail_closed",
-}
+ALLOWED = "http://localhost:5173"
+EVIL = "https://evil.example"
 
 
-def production(**overrides) -> Settings:
-    return Settings(**{**PRODUCTION, "cors_allowed_origins":
-                       "https://console.example.com", **overrides})
+def preflight_headers(origin):
+    return {"Origin": origin, "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type"}
 
 
-class TestOriginsAreConfiguration:
-    def test_origins_come_from_the_environment(self):
-        settings = Settings(cors_allowed_origins="https://a.example,https://b.example")
-        assert settings.cors_origins == ["https://a.example", "https://b.example"]
-
-    def test_whitespace_and_empty_entries_are_tolerated(self):
-        """An operator editing a comma-separated list will leave a trailing
-        comma eventually. Producing an empty-string origin from that would
-        silently match nothing and be very hard to see."""
-        settings = Settings(cors_allowed_origins=" https://a.example , , ")
-        assert settings.cors_origins == ["https://a.example"]
-
-    def test_methods_and_headers_are_configurable_and_not_wildcards(self):
-        settings = get_settings()
-        assert "*" not in settings.cors_methods
-        assert "*" not in settings.cors_headers
-
-    def test_the_mcp_headers_are_allowed(self):
-        """An MCP browser client sends `Mcp-Session-Id` and
-        `MCP-Protocol-Version`. Omitting them would make the endpoint
-        unusable from a browser for a reason nobody would look for in a
-        CORS list."""
-        headers = [h.lower() for h in get_settings().cors_headers]
-        assert "mcp-session-id" in headers
-        assert "mcp-protocol-version" in headers
+async def _preflight(app, origin, path="/health"):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        return await c.options(path, headers=preflight_headers(origin))
 
 
-class TestProductionRefusesUnsafeCORS:
-    def test_a_wildcard_with_credentials_is_refused(self):
-        """Browsers reject `Access-Control-Allow-Origin: *` together with
-        credentials anyway. Configuring it means somebody believes it works,
-        and the usual next step is to "fix" it by turning off something that
-        matters."""
-        with pytest.raises(ValidationError, match="CORS_ALLOWED_ORIGINS"):
-            production(cors_allowed_origins="*", cors_allow_credentials=True)
+def _apps(settings):
+    """Every browser-reachable service, built with the given settings."""
+    import app.agents.service as agent_service
+    import app.ans.service as ans_service
+    import app.main as main
+    from app.agents.service import AgentServiceConfig
 
-    def test_a_plaintext_origin_is_refused_in_production(self):
-        """An http origin means the console's bearer token travels in
-        clear."""
-        with pytest.raises(ValidationError, match="CORS_ALLOWED_ORIGINS"):
-            production(cors_allowed_origins="http://console.example.com")
-
-    def test_an_https_origin_is_accepted(self):
-        assert production().cors_origins == ["https://console.example.com"]
-
-    def test_several_https_origins_are_accepted(self):
-        settings = production(
-            cors_allowed_origins="https://a.example,https://b.example")
-        assert len(settings.cors_origins) == 2
-
-    def test_development_still_allows_localhost(self):
-        """The whole POC runs on localhost. A guard that broke development
-        would be removed within the day, which is not a guard."""
-        settings = Settings(env="development")
-        assert any(o.startswith("http://localhost") for o in settings.cors_origins)
+    originals = (agent_service.get_settings, ans_service.get_settings, main.get_settings)
+    agent_service.get_settings = ans_service.get_settings = main.get_settings = lambda: settings
+    try:
+        return {
+            "iam-api": main.create_app(),
+            "ans": ans_service.create_ans_app(),
+            "agent risk-001": agent_service.create_agent_service(
+                AgentServiceConfig(slug="risk-001")),
+            "agent coordinator-001": agent_service.create_agent_service(
+                AgentServiceConfig(slug="coordinator-001")),
+        }
+    finally:
+        agent_service.get_settings, ans_service.get_settings, main.get_settings = originals
 
 
-class TestTheBrowserContract:
-    async def test_an_allowed_origin_is_echoed(self, client):
-        response = await client.get(
-            "/health", headers={"Origin": "http://localhost:5173"})
-        assert response.headers.get("access-control-allow-origin") == \
-            "http://localhost:5173"
+class TestEveryServiceUsesTheConfiguredAllowList:
+    @pytest.mark.parametrize("name", ["iam-api", "ans", "agent risk-001",
+                                      "agent coordinator-001"])
+    async def test_an_allowed_origin_is_answered(self, name):
+        app = _apps(get_settings())[name]
+        response = await _preflight(app, ALLOWED)
+        assert response.status_code == 200, (name, response.text)
+        assert response.headers["access-control-allow-origin"] == ALLOWED
+        assert response.headers.get("access-control-allow-credentials") == "true"
 
-    async def test_an_unapproved_origin_is_not_echoed(self, client):
-        """Starlette answers the request but omits the header, so the
-        BROWSER refuses to hand the body to the page. The server does not
-        403 — which is precisely why CORS is not an access control and the
-        route guards exist independently."""
-        response = await client.get(
-            "/health", headers={"Origin": "https://evil.example"})
-        assert response.headers.get("access-control-allow-origin") != \
-            "https://evil.example"
+    @pytest.mark.parametrize("name", ["iam-api", "ans", "agent risk-001",
+                                      "agent coordinator-001"])
+    async def test_an_unlisted_origin_is_refused(self, name):
+        app = _apps(get_settings())[name]
+        response = await _preflight(app, EVIL)
+        assert response.status_code == 400, name
+        assert "access-control-allow-origin" not in response.headers
 
-    async def test_a_preflight_from_an_allowed_origin_succeeds(self, client):
-        response = await client.options(
-            "/api/v1/audit",
-            headers={
-                "Origin": "http://localhost:5173",
-                "Access-Control-Request-Method": "GET",
-                "Access-Control-Request-Headers": "authorization",
-            },
-        )
-        assert response.status_code in (200, 204)
-        assert response.headers.get("access-control-allow-origin") == \
-            "http://localhost:5173"
+    async def test_changing_the_configuration_changes_every_service(self):
+        custom = get_settings().model_copy(update={
+            "cors_allowed_origins": "https://ops.bank.example"})
+        for name, app in _apps(custom).items():
+            ok = await _preflight(app, "https://ops.bank.example")
+            old = await _preflight(app, ALLOWED)
+            assert ok.headers.get("access-control-allow-origin") == \
+                "https://ops.bank.example", name
+            assert "access-control-allow-origin" not in old.headers, name
 
-    async def test_a_preflight_from_an_unapproved_origin_is_not_approved(
-        self, client
-    ):
-        response = await client.options(
-            "/api/v1/audit",
-            headers={
-                "Origin": "https://evil.example",
-                "Access-Control-Request-Method": "GET",
-            },
-        )
-        assert response.headers.get("access-control-allow-origin") != \
-            "https://evil.example"
-
-    async def test_a_preflight_for_an_undeclared_method_is_not_approved(
-        self, client
-    ):
-        response = await client.options(
-            "/api/v1/audit",
-            headers={
-                "Origin": "http://localhost:5173",
-                "Access-Control-Request-Method": "TRACE",
-            },
-        )
-        allowed = response.headers.get("access-control-allow-methods", "")
-        assert "TRACE" not in allowed
+    async def test_agents_no_longer_allow_every_header(self):
+        app = _apps(get_settings())["agent risk-001"]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            response = await c.options("/health", headers={
+                "Origin": ALLOWED, "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "x-forwarded-for-spoof"})
+        assert response.status_code == 400
 
 
-class TestCORSIsNotAuthorization:
-    async def test_a_guarded_route_still_refuses_an_allowed_origin(self, client):
-        """THE POINT OF THIS WHOLE FILE.
+class TestConfigurationIsValidatedAtStartup:
+    @pytest.mark.parametrize("bad", [
+        "http://localhost:5173/",            # trailing path
+        "http://localhost:5173/console",
+        "https://*.example.com",             # wildcard fragment
+        "localhost:5173",                    # no scheme
+        "ftp://console.example.com",
+        "https://console.example.com?x=1",
+    ])
+    def test_a_malformed_origin_refuses_to_start(self, bad):
+        with pytest.raises(ValidationError, match="not an exact origin"):
+            Settings(cors_allowed_origins=bad)
 
-        A request from a permitted origin, with no credentials, must still
-        be refused by the route guard. If CORS were doing the authorizing,
-        this would return data.
-        """
-        response = await client.get(
-            "/api/v1/audit", headers={"Origin": "http://localhost:5173"})
-        assert response.status_code in (401, 403)
+    def test_a_wildcard_with_credentials_is_refused_in_every_environment(self):
+        with pytest.raises(ValidationError, match="cannot be"):
+            Settings(env="development", cors_allowed_origins="*",
+                     cors_allow_credentials=True)
 
-    async def test_an_origin_header_is_not_required_either(self, client):
-        """A non-browser caller sends no Origin at all. It must be judged on
-        its credentials, not on the absence of a header."""
-        assert (await client.get("/api/v1/audit")).status_code in (401, 403)
+    def test_a_wildcard_is_refused_in_production_even_without_credentials(self):
+        from tests.test_production_configuration import production
+        with pytest.raises(ValidationError, match="cannot contain"):
+            production(cors_allowed_origins="*", cors_allow_credentials=False)
+
+    def test_production_accepts_an_explicit_https_allow_list(self):
+        from tests.test_production_configuration import production
+        settings = production(cors_allowed_origins="https://console.bank.example,"
+                                                    "https://ops.bank.example")
+        assert settings.cors_middleware_options()["allow_origins"] == [
+            "https://console.bank.example", "https://ops.bank.example"]
+
+    def test_development_defaults_are_the_local_console_only(self):
+        assert Settings(env="development").cors_origins == [
+            "http://localhost:5173", "http://localhost:3000"]

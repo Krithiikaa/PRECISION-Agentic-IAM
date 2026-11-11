@@ -14,7 +14,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query, Request, status
 
-from app.api.deps import SessionDep
+from app.api.deps import KeyStoreDep, SessionDep
 from app.api.schemas import AuditEventIn
 from app.controlplane.guard import ControlPlaneGuard, body_key, fixed
 from app.audit.service import AuditService
@@ -31,6 +31,7 @@ async def query_audit(
     agent_did: str | None = None,
     decision: str | None = None,
     since: datetime | None = None,
+    request_id: str | None = Query(default=None, max_length=128),
     limit: int = Query(default=200, le=1000),
     offset: int = 0,
 ) -> list[dict]:
@@ -39,6 +40,7 @@ async def query_audit(
         agent_did=agent_did,
         decision=decision,
         since=since,
+        request_id=request_id,
         limit=limit,
         offset=offset,
     )
@@ -86,3 +88,42 @@ async def ingest_event(
         )
     )
     return {"accepted": True}
+
+
+# --- Phase 12: audit integrity --------------------------------------------
+@router.get("/integrity", dependencies=[Depends(
+    ControlPlaneGuard("audit_read", target=fixed("audit_integrity")))])
+async def verify_integrity(session: SessionDep, keystore: KeyStoreDep) -> dict:
+    """Verify the hash chain, every MAC and every signed checkpoint, now.
+
+    Runs entirely server-side against the database. A failure is also
+    raised as an AUDIT_INTEGRITY_VIOLATION event and a CRITICAL alert, so
+    asking the question cannot hide the answer.
+    """
+    from app.audit.chain import AuditChain
+
+    chain = AuditChain(session, keystore)
+    report = await chain.verify()
+    body = report.to_dict()
+    if not report.ok:
+        body["alert_id"] = await chain.report_violation(report)
+        await session.commit()
+    return body
+
+
+@router.get("/integrity/checkpoints", dependencies=[Depends(
+    ControlPlaneGuard("audit_read", target=fixed("audit_integrity")))])
+async def integrity_checkpoints(
+    session: SessionDep, keystore: KeyStoreDep, limit: int = Query(default=50, le=500)
+) -> dict:
+    """Signed checkpoints and the checkpoint public key, for external anchoring.
+
+    An auditor who records a checkpoint (and the key) outside this system can
+    later detect truncation of the chain together with its checkpoints, which
+    the database alone cannot reveal.
+    """
+    from app.audit.chain import AuditChain
+
+    chain = AuditChain(session, keystore)
+    return {"trusted_keys": chain.trusted_keys(),
+            "checkpoints": await chain.checkpoints(limit=limit)}

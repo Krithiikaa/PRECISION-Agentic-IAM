@@ -1,17 +1,108 @@
 @import "tailwindcss";
 
-:root {
-  color-scheme: dark;
+/* PRECISION design tokens. Warm off-white canvas, white surfaces, charcoal
+   ink, one deep green accent. Status colours are muted and always paired with
+   a text label, never colour alone. */
+@theme {
+  --font-display: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --color-canvas: #f6f6f1;
+  --color-surface: #ffffff;
+  --color-sunken: #f1f2ec;
+  --color-ink: #17201b;
+  --color-ink-2: #3a4540;
+  --color-muted: #66706a;
+  --color-faint: #8d958f;
+  --color-line: #e3e5dd;
+  --color-line-2: #d3d7cc;
+
+  --color-brand: #0d5537;
+  --color-brand-700: #0a4129;
+  --color-brand-500: #1f7a50;
+  --color-brand-100: #d6e9dd;
+  --color-brand-50: #ecf5ef;
+
+  --color-ok: #1f7a50;
+  --color-ok-bg: #e7f3eb;
+  --color-warn: #8a5300;
+  --color-warn-bg: #fbf0dc;
+  --color-bad: #a3262c;
+  --color-bad-bg: #fbe9e9;
+  --color-info: #2f4f6b;
+  --color-info-bg: #e9eff5;
+
+  --shadow-card: 0 1px 0 rgb(23 32 27 / 0.04), 0 1px 3px rgb(23 32 27 / 0.06);
+  --shadow-lift: 0 1px 0 rgb(23 32 27 / 0.04), 0 8px 24px -12px rgb(23 32 27 / 0.18);
+
+  --animate-rise: rise 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-pulse-dot: pulse-dot 2.4s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.4s linear infinite;
+  /* Phase 12 */
+  --animate-step-in: step-in 360ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  --animate-status-in: status-in 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
 }
 
+@keyframes step-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes status-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes pulse-dot {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(31 122 80 / 0.35); }
+  50% { box-shadow: 0 0 0 5px rgb(31 122 80 / 0); }
+}
+@keyframes shimmer {
+  from { background-position: -200px 0; }
+  to { background-position: 200px 0; }
+}
+
+:root { color-scheme: light; }
+
+html, body { background: var(--color-canvas); }
 body {
   margin: 0;
-  background: #0a0e14;
-  color: #d7dce5;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-feature-settings: "tnum";
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum", "cv11";
 }
 
-.mono {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+.mono { font-family: var(--font-mono); font-size: 0.92em; letter-spacing: -0.01em; }
+.display { font-family: var(--font-display); font-weight: 400; letter-spacing: -0.01em; }
+
+:focus-visible { outline: 2px solid var(--color-brand-500); outline-offset: 2px; border-radius: 4px; }
+
+.skeleton {
+  background: linear-gradient(90deg, #eef0e9 0, #f6f7f2 60px, #eef0e9 120px);
+  background-size: 400px 100%;
+  animation: var(--animate-shimmer);
+  border-radius: 6px;
+}
+
+/* Phase 12: animated disclosure (height via grid rows, no JS measuring). */
+.disclosure-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 280ms cubic-bezier(0.2, 0.7, 0.2, 1), opacity 220ms ease;
+}
+.disclosure-body[data-open="true"] { grid-template-rows: 1fr; opacity: 1; }
+.disclosure-body > div { min-height: 0; overflow: hidden; }
+.disclosure-chevron { transition: transform 220ms ease; }
+[data-open="true"] > .disclosure-chevron, button[aria-expanded="true"] .disclosure-chevron { transform: rotate(90deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }

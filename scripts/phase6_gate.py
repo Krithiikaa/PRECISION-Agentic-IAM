@@ -268,6 +268,7 @@ check("an agent cannot revoke", status in (401, 403), True)
 # ---------------------------------------------------------------------------
 print("\n  SCENARIO 3  A mandate that has run out of time")
 
+cp_sign.fresh_window()   # a 2-second window must not straddle a Retry-After pause
 short = request_mandate(ttl_seconds=2, max_uses=3)
 SHORT = (short.get("grant") or {}).get("grant_id")
 check("a short-lived mandate is issued", short.get("issued"), True)

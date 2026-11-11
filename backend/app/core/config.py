@@ -292,6 +292,11 @@ class Settings(BaseSettings):
     # request. The second is refused in production by the validator below:
     # a per-process counter across N workers is an N-times-looser limit that
     # reports itself as enforced.
+    # The per-ADDRESS ceiling, as a multiple of each tier's per-identity limit.
+    # A request naming an identity is counted against that identity AND
+    # against its address; the address ceiling is what bounds a caller who
+    # invents a new identity per request to get a fresh bucket.
+    ratelimit_address_multiplier: int = Field(default=10, ge=1, le=1000)
     ratelimit_redis_policy: str = "fail_open_local"
     ratelimit_redis_timeout_seconds: float = 0.25
     # Networks whose X-Forwarded-For this service will believe. EMPTY means
@@ -311,6 +316,73 @@ class Settings(BaseSettings):
     # freshness (an offline audit of an archived presentation) should be
     # able to say so explicitly rather than by omission.
     challenge_required: bool = True
+
+    # --- Trust & risk engine, anomaly detection, Session Authority -------
+    # (CSA paper sections 4.2 Layer 4, 5.3 and 5.4.)
+    #
+    # A trust score is 100 minus the weight of every unexpired negative
+    # signal, floored at 0. Signals expire, so an agent that stops misbehaving
+    # recovers on its own; a CONTAINED agent does not, because containment is
+    # a separate state only a human can lift.
+    trust_signal_ttl_seconds: int = Field(default=86_400, ge=60)
+    # Score bands. Below `trust_reduced_below` sensitive actions escalate to a
+    # human; below `trust_untrusted_below` the PDP denies outright.
+    trust_reduced_below: int = Field(default=70, ge=1, le=100)
+    trust_untrusted_below: int = Field(default=40, ge=0, le=99)
+    # --- Phase 12: tamper-evident audit trail ---
+    # The sealer chains committed audit events (app/audit/integrity.py). It is
+    # NOT a gate-harness switch: production refuses it off.
+    audit_sealer_enabled: bool = True
+    audit_seal_interval_seconds: float = Field(default=2.0, gt=0)
+    audit_seal_batch_size: int = Field(default=2000, ge=1, le=50_000)
+    # A signed checkpoint at most this often while new entries are sealed.
+    # Bounds how much of the chain's tail could be truncated undetected.
+    audit_checkpoint_interval_seconds: float = Field(default=30.0, gt=0)
+    # Full verification cadence, and how long an event may stay unsealed
+    # before the verifier reports it.
+    audit_verify_interval_seconds: float = Field(default=900.0, gt=0)
+    audit_unsealed_grace_seconds: float = Field(default=120.0, gt=0)
+    audit_checkpoint_kid: str = "did:poc:service:audit-integrity#checkpoint-1"
+    # Optional base64 Ed25519 public key an auditor recorded out of band. When
+    # set, checkpoints signed by any other key fail verification.
+    audit_pinned_checkpoint_key: str = ""
+
+    # The anomaly detector tails the audit trail from inside the IAM API.
+    anomaly_detector_enabled: bool = True
+    anomaly_poll_seconds: float = Field(default=2.0, gt=0)
+    # Rule thresholds. Counted per authenticated agent DID.
+    anomaly_denial_burst_count: int = Field(default=5, ge=2)
+    anomaly_denial_burst_window_seconds: int = Field(default=60, ge=1)
+    anomaly_rate_spike_count: int = Field(default=40, ge=2)
+    anomaly_rate_spike_window_seconds: int = Field(default=60, ge=1)
+    anomaly_jit_denied_count: int = Field(default=3, ge=2)
+    anomaly_jit_denied_window_seconds: int = Field(default=600, ge=1)
+    anomaly_spawn_count: int = Field(default=5, ge=2)
+    anomaly_spawn_window_seconds: int = Field(default=60, ge=1)
+    # When trust collapses to UNTRUSTED, contain the agent automatically
+    # (paper R-129 "automated response"). A human still has to reinstate.
+    auto_containment_enabled: bool = True
+    # Redis pub/sub channel the Session State Synchronizer pushes on.
+    sss_channel: str = "agentic-iam:sss"
+
+    # --- Delegated identities: sub-agents, ephemeral agents, forks --------
+    # (CSA paper Table 3, R-63/64/65, R-94, R-253, R-254.)
+    # A persistent agent is depth 0. A sub-agent of it is depth 1, and so on.
+    # Re-delegation beyond this depth is refused (paper R-254: "limiting
+    # re-delegation chains").
+    delegation_max_depth: int = Field(default=2, ge=1, le=8)
+    # Ceiling on any delegated identity's lifetime, and the default for an
+    # ephemeral one. A child never outlives its parent or the credentials it
+    # was delegated from, whatever is requested.
+    delegation_max_ttl_seconds: int = Field(default=86_400, ge=60)
+    ephemeral_default_ttl_seconds: int = Field(default=900, ge=30)
+    # Hard spawn-rate limit per parent (paper R-253). The anomaly detector
+    # alerts earlier, at ANOMALY_SPAWN_COUNT.
+    delegation_max_spawns: int = Field(default=10, ge=1)
+    delegation_spawn_window_seconds: int = Field(default=60, ge=1)
+    # The runtime version recorded in every Agent ID profile and bound into
+    # its model hash.
+    agent_software_version: str = "agentic-iam-runtime/1.0.0"
 
     # --- Phase 10: CORS ---
     # Was hardcoded to two localhost origins in main.py. Now configuration,
@@ -362,6 +434,52 @@ class Settings(BaseSettings):
         ("mcp_resource_uri", "the OAuth resource agents present tokens to"),
         ("api_public_url", "the base URL this service advertises"),
     )
+
+    @model_validator(mode="after")
+    def _cors_origins_are_explicit(self):
+        """Phase 12: validated in EVERY environment, not only production.
+
+        The same list now configures the IAM API, the ANS and every agent
+        process, so a malformed entry would fail open in nine places at once.
+        Each entry must be an exact origin (scheme://host[:port], no path,
+        no wildcard fragment). A bare '*' is refused with credentials
+        everywhere, and refused outright in production (below).
+        """
+        import re
+
+        pattern = re.compile(r"^https?://[A-Za-z0-9.\-]+(:[0-9]{1,5})?$")
+        for origin in self.cors_origins:
+            if origin == "*":
+                if self.cors_allow_credentials:
+                    raise ValueError(
+                        "CORS_ALLOWED_ORIGINS cannot be '*' while CORS_ALLOW_CREDENTIALS is "
+                        "true: browsers refuse that combination, so it is a "
+                        "misconfiguration that looks like a permission.")
+                continue
+            if not pattern.match(origin):
+                raise ValueError(
+                    f"CORS_ALLOWED_ORIGINS entry {origin!r} is not an exact origin "
+                    "(expected scheme://host[:port] with no path, query or wildcard)")
+        return self
+
+    def cors_middleware_options(self) -> dict:
+        """The one CORS configuration, for the IAM API, the ANS and every agent."""
+        return {"allow_origins": self.cors_origins,
+                "allow_credentials": self.cors_allow_credentials,
+                "allow_methods": self.cors_methods, "allow_headers": self.cors_headers,
+                "max_age": self.cors_max_age_seconds}
+
+    @model_validator(mode="after")
+    def _trust_bands_are_ordered(self):
+        # An inverted pair would make REDUCED unreachable and silently turn
+        # every degraded agent straight into a denied one -- or, the other way
+        # round, never deny anyone. Refuse rather than guess which was meant.
+        if self.trust_untrusted_below >= self.trust_reduced_below:
+            raise ValueError(
+                "TRUST_UNTRUSTED_BELOW must be lower than TRUST_REDUCED_BELOW "
+                f"(got {self.trust_untrusted_below} >= {self.trust_reduced_below})"
+            )
+        return self
 
     @model_validator(mode="after")
     def _production_requires_tls(self):
@@ -421,6 +539,21 @@ class Settings(BaseSettings):
             for name, what in self._PRODUCTION_TLS_URLS
             if not str(getattr(self, name)).lower().startswith("https://")
         ]
+        # --- anomaly detection ---------------------------------------
+        # The security gates start the API with the detector off, because
+        # they deliberately attack as one agent and then expect it to keep
+        # working. That switch is a TEST-HARNESS setting and must never
+        # reach production, for the same reason the rate limiter's cannot.
+        if not self.anomaly_detector_enabled:
+            raise ValueError(
+                "ANOMALY_DETECTOR_ENABLED cannot be false when ENV=production: "
+                "it is the gate-harness switch, not an operating mode."
+            )
+        if not self.audit_sealer_enabled:
+            raise ValueError(
+                "AUDIT_SEALER_ENABLED cannot be false when ENV=production: an "
+                "audit trail nobody chains is not tamper-evident."
+            )
         # --- rate limiting ---------------------------------------------
         if not self.ratelimit_enabled:
             raise ValueError(
@@ -452,7 +585,12 @@ class Settings(BaseSettings):
             )
         for origin in self.cors_origins:
             if origin == "*":
-                continue
+                # Phase 12: an explicit allow-list only. A wildcard without
+                # credentials still lets any site read every response that
+                # needs no cookie, which is not a production posture.
+                raise ValueError(
+                    "CORS_ALLOWED_ORIGINS cannot contain '*' when ENV=production; "
+                    "list each console origin explicitly.")
             if not origin.startswith("https://"):
                 raise ValueError(
                     f"CORS_ALLOWED_ORIGINS entry {origin!r} must be https in "

@@ -136,8 +136,10 @@ async def request_grant(
     ControlPlaneGuard("grant_read", target=fixed("grant_registry")))])
 async def list_grants(
     session: SessionDep,
-    agent_did: str = Query(description="Whose mandates to list."),
+    agent_did: str | None = Query(default=None, description="Whose mandates to list; "
+                                  "omit for the most recent across all agents."),
     active_only: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
 ) -> list[dict[str, Any]]:
     """Mandates held by one agent.
 
@@ -147,8 +149,18 @@ async def list_grants(
     from the list -- it is available on the individual record.
     """
     service = JITService(session)
-    return [record.to_dict() for record in
-            await service.for_agent(agent_did, active_only=active_only)]
+    if agent_did:
+        return [record.to_dict() for record in
+                await service.for_agent(agent_did, active_only=active_only)]
+    # The operations console's grant view: every agent, newest first. Same
+    # guard (`grant_read`), same omission of the artifact.
+    from sqlalchemy import select
+
+    from app.db.models.jit import JITGrant, JITGrantStatus
+    stmt = select(JITGrant).order_by(JITGrant.issued_at.desc()).limit(limit)
+    if active_only:
+        stmt = stmt.where(JITGrant.status == JITGrantStatus.ACTIVE)
+    return [r.to_dict() for r in (await session.execute(stmt)).scalars()]
 
 
 @router.get("/keys")

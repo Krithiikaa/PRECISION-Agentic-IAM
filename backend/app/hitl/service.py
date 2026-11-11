@@ -15,8 +15,8 @@ STATE MACHINE. Transitions are an explicit table, not a convention:
 
     PENDING ──approve──> APPROVED ──consume──> CONSUMED
        │                    │
-       ├──reject──> REJECTED└──expire──> EXPIRED
-       ├──expire──> EXPIRED
+       ├──reject──> REJECTED├──expire──> EXPIRED
+       ├──expire──> EXPIRED └─(containment only)─> CANCELLED   (Phase 12)
        └──cancel──> CANCELLED
 
 Terminal is terminal. CONSUMED -> APPROVED and REJECTED -> CONSUMED are
@@ -96,6 +96,21 @@ ALLOWED_TRANSITIONS: dict[ApprovalStatus, frozenset[ApprovalStatus]] = {
     ApprovalStatus.EXPIRED: frozenset(),
     ApprovalStatus.CANCELLED: frozenset(),
     ApprovalStatus.CONSUMED: frozenset(),
+}
+
+# Resources whose approvals are subject to maker-checker. Phase 12: if the
+# officer of record cannot be read, a decision on these is refused.
+MAKER_CHECKER_RESOURCES = frozenset({"loan_applications", "payment_instructions"})
+
+# Phase 12. The ONLY additional transitions, reachable ONLY through
+# `cancel_for_agent`, which only the Session Authority calls when an agent is
+# contained. An operator still cannot cancel a decided approval (the table
+# above refuses it); containment withdraws an APPROVED-but-unspent one because
+# a sign-off given to an agent before its compromise must not be spendable
+# after reinstatement.
+CONTAINMENT_TRANSITIONS: dict[ApprovalStatus, ApprovalStatus] = {
+    ApprovalStatus.PENDING: ApprovalStatus.CANCELLED,
+    ApprovalStatus.APPROVED: ApprovalStatus.CANCELLED,
 }
 
 
@@ -542,6 +557,22 @@ class ApprovalService:
 
         material = material_attributes(record.resource_type, record.resource_id)
         submitted_by = material.get("submitted_by")
+        # Phase 12: FAIL CLOSED. For a resource with an officer of record, not
+        # knowing who submitted it means maker-checker cannot be enforced, so
+        # the decision is refused rather than waved through. (Rego's rule
+        # only fires when `submitted_by` is a string; this is the hard stop.)
+        if (record.resource_type in MAKER_CHECKER_RESOURCES
+                and not material.get("available")):
+            await self.audit.record(Event(
+                EventType.APPROVAL_SELF_APPROVAL_REJECTED, agent_did=record.agent_did,
+                request_id=record.request_id, resource=record.resource_type,
+                action=record.action, decision="DENY", reason="OFFICER_OF_RECORD_UNKNOWN",
+                metadata={"approval_id": record.approval_id,
+                          "resource_id": record.resource_id,
+                          "detail": material.get("detail")}))
+            raise SelfApprovalRefused(
+                f"the officer of record for {record.resource_id} cannot be established, "
+                f"so maker-checker cannot be enforced; refusing the decision")
         if not submitted_by or submitted_by != approver.username:
             return
         await self.audit.record(
@@ -1059,6 +1090,33 @@ class ApprovalService:
                   metadata={"approval_id": record.approval_id})
         )
         return record
+
+    async def cancel_for_agent(
+        self, agent_did: str, *, reason: str, now: datetime | None = None
+    ) -> list[str]:
+        """Withdraw every PENDING or APPROVED-but-unspent approval for an agent.
+
+        Called by the Session Authority when an agent is contained. One
+        conditional UPDATE, not read-then-write: `consume()` is itself a
+        conditional UPDATE on status=APPROVED, so whichever commits first wins
+        and an approval can never be both cancelled and spent.
+        """
+        now = now or datetime.now(timezone.utc)
+        rows = (await self.session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.agent_did == agent_did,
+                   ApprovalRequest.status.in_(list(CONTAINMENT_TRANSITIONS)))
+            .values(status=ApprovalStatus.CANCELLED)
+            .returning(ApprovalRequest.approval_id, ApprovalRequest.request_id,
+                       ApprovalRequest.resource_type, ApprovalRequest.action)
+        )).all()
+        for approval_id, request_id, resource_type, action in rows:
+            await self.audit.record(
+                Event(EventType.APPROVAL_CANCELLED, agent_did=agent_did,
+                      request_id=request_id, resource=resource_type, action=action,
+                      decision="CANCELLED", reason=reason,
+                      metadata={"approval_id": approval_id, "cause": "containment"}))
+        return [r[0] for r in rows]
 
     async def expire_overdue(self, now: datetime | None = None) -> list[str]:
         """Move overdue requests and approvals to EXPIRED.

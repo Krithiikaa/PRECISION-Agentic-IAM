@@ -47,6 +47,9 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "Be concise and decisive."
         ),
         port=9001,
+        # The coordinator's own protected tools: the workflow queue in the
+        # (SIMULATED) loan management system. It never reads customer data.
+        planned_tools=("claim_next_loan_workflow", "record_loan_workflow_outcome"),
     ),
     "kyc-001": AgentDefinition(
         slug="kyc-001",
@@ -90,7 +93,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "or unusual behaviour, and you report a fraud signal level with reasons."
         ),
         port=9004,
-        planned_tools=("get_fraud_history", "get_transaction_patterns"),
+        planned_tools=("get_fraud_history", "get_transaction_patterns", "get_fraud_signals"),
     ),
     # Two further risk agents. They exist so discovery has to actually choose
     # between real, equally-capable providers rather than resolving to the one
@@ -101,7 +104,12 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         name="Credit Risk Analysis Agent (secondary)",
         agent_type=AgentType.RISK,
         purpose="Analyse the financial risk of a loan application.",
-        capabilities=("credit_analysis", "financial_data_read", "risk_analysis"),
+        # `affordability_assessment` makes this the loan workflow's RISK
+        # ASSESSMENT agent (blueprint step 6). Unique to this agent, so
+        # capability discovery resolves the step to the one agent that holds
+        # a credential for it.
+        capabilities=("credit_analysis", "financial_data_read", "risk_analysis",
+                      "affordability_assessment"),
         system_prompt=(
             "You are a Credit Risk Analysis Agent. You interpret credit scores, "
             "debt-to-income ratios and loan history that have been computed for "
@@ -109,7 +117,8 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "perform arithmetic yourself."
         ),
         port=9006,
-        planned_tools=("get_credit_profile", "get_financial_profile", "get_loan_history"),
+        planned_tools=("get_credit_profile", "get_financial_profile", "get_loan_history",
+                       "assess_loan_risk"),
     ),
     "risk-003": AgentDefinition(
         slug="risk-003",
@@ -154,6 +163,24 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         port=9008,
         planned_tools=("execute_payment_instruction",),
     ),
+    # The loan workflow's DOCUMENT VERIFICATION agent (blueprint step 8). It
+    # checks that an application's documents are present and match what the
+    # (SIMULATED) document store holds. It reads no customer financial data.
+    "docs-001": AgentDefinition(
+        slug="docs-001",
+        name="Document Verification Agent",
+        agent_type=AgentType.DOCUMENT_VERIFICATION,
+        purpose="Verify the supporting documents of a loan application.",
+        capabilities=("document_verification",),
+        system_prompt=(
+            "You are the Document Verification Agent. You check that a loan "
+            "application's required documents are present and match the "
+            "document store. You report completeness and any mismatch. You do "
+            "not assess credit, fraud or affordability."
+        ),
+        port=9009,
+        planned_tools=("verify_loan_documents",),
+    ),
     "decision-001": AgentDefinition(
         slug="decision-001",
         name="Loan Decision Agent",
@@ -168,6 +195,9 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
             "deterministic business rules, not by you; you explain and recommend."
         ),
         port=9005,
+        # Records the loan outcome through the AEM. Policy decides whether it
+        # may do so alone or only with one or two human approvals.
+        planned_tools=("approve_loan_application",),
     ),
 }
 

@@ -314,3 +314,61 @@ class TestSpoofedClientAddresses:
             "P", (), {"did": "did:poc:agent:risk-001", "username": None}
         )()
         assert middleware.client_identifier(request) == "id:did:poc:agent:risk-001"
+
+
+class TestIdentityKeyingActuallyRuns:
+    """REGRESSION. The limiter runs before authentication, so the 'keyed on
+    identity' rule never fired: every caller on one host shared ONE bucket and
+    nine agents starved each other. The test above sets the principal by hand,
+    which is how the defect stayed hidden."""
+
+    def _app(self, limit=3, multiplier=2):
+        from fastapi import FastAPI
+        from httpx import ASGITransport, AsyncClient
+
+        from app.ratelimit.limiter import RateLimiter
+        from app.ratelimit.middleware import RateLimitMiddleware
+
+        # The real Redis, with a unique client address and unique identities
+        # per test, so buckets never leak between tests or runs.
+        settings = Settings(ratelimit_enabled=True, ratelimit_read=f"{limit},60",
+                            ratelimit_address_multiplier=multiplier,
+                            ratelimit_redis_policy="fail_closed")
+        app = FastAPI()
+
+        @app.get("/api/v1/agents")
+        async def agents():
+            return []
+
+        app.add_middleware(RateLimitMiddleware, settings=settings)
+        self.run = uuid.uuid4().hex[:8]
+        address = f"10.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}.{uuid.uuid4().int % 250}"
+        return AsyncClient(transport=ASGITransport(app=app, client=(address, 1234)),
+                           base_url="http://t")
+
+    async def get(self, client, did=None):
+        did = did.replace("did:poc:agent:", f"did:poc:agent:{self.run}-") if did and did.startswith("did:") else did
+        headers = {"X-CP-Principal": did} if did else {}
+        return (await client.get("/api/v1/agents", headers=headers)).status_code
+
+    async def test_two_identities_on_one_host_do_not_share_a_bucket(self):
+        async with self._app(limit=3, multiplier=10) as client:
+            a = [await self.get(client, "did:poc:agent:a") for _ in range(3)]
+            b = [await self.get(client, "did:poc:agent:b") for _ in range(3)]
+        assert a == [200] * 3 and b == [200] * 3
+
+    async def test_one_identity_is_still_limited(self):
+        async with self._app(limit=3, multiplier=10) as client:
+            codes = [await self.get(client, "did:poc:agent:a") for _ in range(4)]
+        assert codes == [200, 200, 200, 429]
+
+    async def test_inventing_identities_is_bounded_by_the_address_ceiling(self):
+        """An unverified claim buys at most limit x multiplier from one address."""
+        async with self._app(limit=2, multiplier=2) as client:
+            codes = [await self.get(client, f"did:poc:agent:x{i}") for i in range(6)]
+        assert codes.count(200) == 4 and codes[-1] == 429
+
+    async def test_a_malformed_claim_is_counted_by_address(self):
+        async with self._app(limit=2, multiplier=10) as client:
+            codes = [await self.get(client, "not a did <script>") for _ in range(3)]
+        assert codes == [200, 200, 429]

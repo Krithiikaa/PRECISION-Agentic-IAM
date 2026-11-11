@@ -122,6 +122,18 @@ required_role := {
 	# business opening a customer's file, and the fact that it can suspend
 	# the agent processing that file does not change the answer.
 	"loan_read": "loan_admin",
+
+	# Session Authority. With `identity_admin`, which already suspends and
+	# terminates agents: containment is that same authority applied across
+	# every protocol at once, and adds nothing the role did not already have.
+	"incident_contain": "identity_admin",
+	"incident_reinstate": "identity_admin",
+	"anomaly_scan": "identity_admin",
+	"agent_spawn": "identity_admin",
+	"agent_profile_publish": "identity_admin",
+	# Automation (the end-to-end gate) submits as the loan administrator,
+	# the role that already owns application amounts.
+	"loan_workflow_submit": "loan_admin",
 }
 
 # Operations that belong to HUMANS. An administrator key is a machine

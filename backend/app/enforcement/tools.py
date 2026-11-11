@@ -40,7 +40,6 @@ from app.enforcement.resources import (
     LOAN_APPLICATIONS,
     PAYMENT_INSTRUCTIONS,
     PAYROLL_RECORDS,
-    approve_loan_application,
     execute_payment_instruction,
     get_credit_record,
     get_payroll_record,
@@ -66,6 +65,9 @@ class AmbiguousEnforcementPath(RuntimeError):
     one an attacker gets to choose between.
     """
 
+
+# Names the AEM injects into durable tools. A caller can never supply them.
+RESERVED_ARGUMENTS = frozenset({"session", "request_id", "subject_did"})
 
 # Module-private sentinel. A grant is only valid if it was constructed with
 # this, which only `mint_grant` below possesses. Constructing EnforcementGrant
@@ -167,22 +169,41 @@ class ProtectedTool:
     # Which argument names the resource instance, so the AEM can bind the
     # authorization request to a specific record rather than a whole table.
     resource_id_argument: str = "customer_id"
+    # Phase 12. A DURABLE tool writes through the AEM's own database session,
+    # inside a SAVEPOINT: its state change commits with the AEM's audit
+    # records, and a handler that fails part-way leaves nothing behind. The
+    # AEM also hands it the request id and the subject FROM THE GRANT, so a
+    # durable record names the authenticated caller, never an argument.
+    needs_session: bool = False
 
-    async def __call__(self, *, _grant: EnforcementGrant | None = None, **kwargs: Any) -> Any:
+    async def __call__(self, *, _grant: EnforcementGrant | None = None,
+                       _session: Any = None, **kwargs: Any) -> Any:
         if _grant is None:
             raise EnforcementBypassError(
                 f"{self.spec.name!r} is a protected tool and was called without an "
                 f"enforcement grant. The only permitted path is "
                 f"agent -> AEM -> PDP -> ALLOW -> tool."
             )
+        reserved = {k for k in kwargs if k.startswith("_") or k in RESERVED_ARGUMENTS}
+        if reserved:
+            raise ValueError(f"argument name(s) {sorted(reserved)} are reserved for the AEM")
         _grant.consume(
             tool_name=self.spec.name,
             subject_did=_grant.subject_did,
             resource_id=kwargs.get(self.resource_id_argument),
         )
-        result = self.handler(**kwargs)
-        if isinstance(result, Awaitable):
-            result = await result
+        if not self.needs_session:
+            result = self.handler(**kwargs)
+            if isinstance(result, Awaitable):
+                result = await result
+            return result
+        if _session is None:
+            raise RuntimeError(f"{self.spec.name!r} is durable and needs the AEM's session")
+        async with _session.begin_nested():
+            result = self.handler(session=_session, request_id=_grant.request_id,
+                                  subject_did=_grant.subject_did, **kwargs)
+            if isinstance(result, Awaitable):
+                result = await result
         return result
 
 
@@ -257,6 +278,12 @@ class ProtectedToolRegistry:
         return len(self._tools)
 
 
+async def _approve_any_application(application_id: str, decision_note: str = "",
+                                   **injected: Any) -> dict[str, Any]:
+    from app.banking import adapters
+    return await adapters.approve_loan_application(application_id, decision_note, **injected)
+
+
 def _customer_parameter(description: str) -> dict[str, Any]:
     return {
         "type": "object",
@@ -326,11 +353,14 @@ def build_default_registry() -> ProtectedToolRegistry:
                 resource=LOAN_APPLICATIONS,
                 action="approve_loan",
             ),
-            handler=approve_loan_application,
+            handler=_approve_any_application,
             # The resource is a loan application, not a customer. Binding the
             # grant to the wrong argument would let an approval for one
             # application be spent on another.
             resource_id_argument="application_id",
+            # Phase 12: a workflow application is decided in PostgreSQL, at
+            # most once; a demonstration fixture keeps its in-memory record.
+            needs_session=True,
         )
     )
     registry.register(
@@ -387,4 +417,69 @@ def build_default_registry() -> ProtectedToolRegistry:
             handler=get_payroll_record,
         )
     )
+    _register_loan_workflow_tools(registry)
     return registry
+
+
+def _application_parameter(description: str) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"application_id": {"type": "string", "description": description}},
+        "required": ["application_id"],
+    }
+
+
+def _register_loan_workflow_tools(registry: ProtectedToolRegistry) -> None:
+    """The loan workflow's specialist tools, over SIMULATED adapters.
+
+    The adapters are stand-ins (app/banking/adapters.py); the path to them is
+    not. Each tool is reachable only through the AEM, by an agent whose OWN
+    verified credential names the tool's resource type and the workflow's
+    purpose -- see policies/loan/workflow.rego.
+    """
+    from app.banking import adapters
+
+    # The coordinator's two tools over the workflow queue. The resource id is
+    # the queue for a claim and the workflow for a record, so a grant minted
+    # for one workflow cannot be spent recording another.
+    for name, description, action, handler, resource_arg, params in (
+        ("claim_next_loan_workflow",
+         "Claim the next loan workflow to coordinate (SIMULATED loan management system).",
+         "claim", adapters.claim_next_loan_workflow, "queue",
+         {"type": "object", "properties": {"queue": {"type": "string"}}, "required": ["queue"]}),
+        ("record_loan_workflow_outcome",
+         "Record a loan workflow's outcome (SIMULATED loan management system).",
+         "record", adapters.record_loan_workflow_outcome, "workflow_id",
+         {"type": "object", "properties": {"workflow_id": {"type": "string"},
+                                            "status": {"type": "string"}},
+          "required": ["workflow_id", "status"]}),
+    ):
+        registry.register(ProtectedTool(
+            spec=ToolSpec(name=name, description=description, parameters=params,
+                          required_capability="loan_workflow_coordination",
+                          resource=adapters.LOAN_WORKFLOWS, action=action),
+            handler=handler, resource_id_argument=resource_arg, needs_session=True))
+
+    for name, description, capability, resource, action, handler, by_application in (
+        ("get_kyc_record", "Read a customer's KYC record (SIMULATED KYC registry).",
+         "kyc_verification", adapters.KYC_RECORDS, "read", adapters.get_kyc_record, False),
+        ("get_fraud_signals", "Read fraud-screening signals (SIMULATED fraud service).",
+         "fraud_detection", adapters.FRAUD_SIGNALS, "read", adapters.get_fraud_signals, False),
+        ("verify_loan_documents",
+         "Verify an application's documents against the SIMULATED document store.",
+         "document_verification", adapters.LOAN_DOCUMENTS, "verify",
+         adapters.verify_loan_documents, True),
+        ("assess_loan_risk", "Compute affordability for an application (SIMULATED risk model).",
+         "affordability_assessment", adapters.RISK_MODELS, "assess", adapters.assess_loan_risk, True),
+    ):
+        registry.register(ProtectedTool(
+            spec=ToolSpec(
+                name=name, description=description,
+                parameters=(_application_parameter("The loan application")
+                            if by_application else _customer_parameter("The customer")),
+                required_capability=capability, resource=resource, action=action),
+            handler=handler,
+            resource_id_argument="application_id" if by_application else "customer_id",
+            # Application-scoped tools read durable workflow state.
+            needs_session=by_application,
+        ))

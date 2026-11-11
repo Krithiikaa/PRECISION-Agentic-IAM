@@ -539,7 +539,7 @@ class AdapterEnforcementMiddleware:
             policy_ref=decision.policy_ref,
         )
         try:
-            result = await tool(_grant=grant, **arguments)
+            result = await tool(_grant=grant, _session=self.session, **arguments)
         except EnforcementBypassError:
             # Should be unreachable: the AEM just minted this grant. If it
             # happens, something is wrong with the boundary itself -- fail.
@@ -979,7 +979,7 @@ class AdapterEnforcementMiddleware:
             policy_ref=decision.policy_ref,
         )
         try:
-            result = await tool(_grant=grant, **arguments)
+            result = await tool(_grant=grant, _session=self.session, **arguments)
         except EnforcementBypassError:
             raise
         except AmountReconciliationError as exc:

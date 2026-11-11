@@ -75,6 +75,9 @@ self_operations := {
 	# target to a fixed string rather than a DID, so it never matches an
 	# agent's own DID and stays closed to agents entirely.
 	"credential_read",
+	# Spawning a delegated identity on its OWN behalf. Acting on another
+	# agent's behalf is denied by the rule below like every other self op.
+	"agent_spawn",
 }
 
 allow contains object.union(agent_self, {"reason": "AGENT_ACTING_ON_SELF"}) if {

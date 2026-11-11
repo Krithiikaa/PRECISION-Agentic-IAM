@@ -31,6 +31,7 @@ def build_did_document(
     capabilities: list[str] | None = None,
     status: str | None = None,
     parent_did: str | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verification_method = {
         "id": kid,
@@ -69,6 +70,10 @@ def build_did_document(
         metadata["status"] = status
     if parent_did:
         metadata["delegatedBy"] = parent_did
+    # The rich Agent ID profile (CSA paper section 3.2): provenance, model and
+    # software hash, scope of behaviour, toolset. See app/identity/profile.py.
+    if profile:
+        metadata["profile"] = profile
     if metadata:
         document["agentMetadata"] = metadata
     return document

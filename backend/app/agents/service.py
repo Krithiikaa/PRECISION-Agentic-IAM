@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -42,6 +42,7 @@ from app.identity.did import build_agent_did, key_id
 from app.identity.keys import EncryptedFileKeyStore
 from app.controlplane.client import canonical_body, control_plane_headers
 from app.identity.signer import Signer, verify_signature
+from app.workflows.peer import minimise
 from app.llm.ollama import build_llm_provider
 from app.monitoring.events import EventType
 
@@ -188,6 +189,7 @@ async def _confirm_identity_with_iam(
     did: str,
     public_key_multibase: str,
     endpoint: str | None,
+    sign_read: Callable[[str], dict] | None = None,
 ) -> dict[str, Any]:
     """Confirm that this process's key really controls its registered DID.
 
@@ -209,7 +211,12 @@ async def _confirm_identity_with_iam(
     verify, or -- worse -- imply this process is the legitimate holder when it
     is not.
     """
-    existing = await client.get(f"/api/v1/agents/did/{did}")
+    # SIGNED since the read API became authenticated (Phase 10). Unsigned,
+    # this returned 401 on every start, the agent recorded "registration
+    # failed", and its wallet was never loaded -- a regression the startup
+    # banner showed as `registered=False` for every agent.
+    path = f"/api/v1/agents/did/{did}"
+    existing = await client.get(path, headers=sign_read(path) if sign_read else None)
     if existing.status_code == 404:
         raise AgentBootstrapError(
             f"NOT PROVISIONED: {did} has no registered identity. Agents no "
@@ -279,8 +286,14 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
 
         # --- 2. confirm the provisioned identity ------------------------
         try:
+            def _sign_identity_read(path: str) -> dict:
+                return control_plane_headers(
+                    Signer(keystore), principal_did=did, kid=handle.kid,
+                    method="GET", path=path, body=canonical_body(None))
+
             await _confirm_identity_with_iam(
-                iam, definition, did, handle.public_key_multibase, config.public_url
+                iam, definition, did, handle.public_key_multibase, config.public_url,
+                sign_read=_sign_identity_read,
             )
             state["registered"] = True
         except AgentBootstrapError as exc:
@@ -346,6 +359,9 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
         )
         state["keystore"] = keystore
         state["wallet"] = wallet
+        state["kid"] = handle.kid
+        from app.workflows.peer import InstructionVerifier
+        state["instructions"] = InstructionVerifier(iam, did)
         if state["registered"]:
             held = await wallet.refresh()
             log.info("wallet_loaded", did=did, credentials=len(held),
@@ -372,6 +388,10 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
 
         stop = asyncio.Event()
         state["ans_stop"] = stop
+        # Session State Synchronizer push: a local view of locked-out DIDs.
+        from app.sessions.subscriber import LocalSessionView, subscribe
+        state["sessions"] = LocalSessionView()
+        state["sss_task"] = asyncio.create_task(subscribe(settings, state["sessions"], stop))
         runtime_ref = state["runtime"]
         heartbeat_task = asyncio.create_task(
             ans.heartbeat_loop(
@@ -399,6 +419,14 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
                 ans=ans, llm=llm, iam_client=iam, did=did,
                 sign_read=_sign_read,
             )
+            # The end-to-end loan workflow (blueprint steps 3-17). Runs as
+            # this agent, with this agent's key; see app/workflows/loan.py.
+            if os.environ.get("LOAN_WORKFLOW_ENABLED", "true").lower() == "true":
+                from app.workflows.loan import LoanWorkflowRunner
+                runner = LoanWorkflowRunner(
+                    coordinator=state["coordinator"], iam=iam, signer=Signer(keystore),
+                    did=did, kid=handle.kid, sessions=state["sessions"])
+                state["workflow_task"] = asyncio.create_task(runner.run_forever(stop))
         log.info(
             "agent_started", did=did, port=config.port, registered=state["registered"],
             llm_available=health.available,
@@ -409,6 +437,10 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
             # Graceful shutdown: tell the ANS we are going away so no further
             # work is routed here, rather than waiting for the heartbeat to lapse.
             stop.set()
+            if state.get("workflow_task"):
+                state["workflow_task"].cancel()
+            if state.get("sss_task"):
+                state["sss_task"].cancel()
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
@@ -429,13 +461,12 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
     # A browser console must reach the agent directly: only the agent can
     # produce a holder proof, because only it has its own private key. The IAM
     # API cannot proxy that on its behalf.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://localhost:3000"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    #
+    # Phase 12: origins, methods and headers come from the SAME validated
+    # configuration as the IAM API (CORS_ALLOWED_ORIGINS etc.), not from a
+    # literal. An unlisted origin gets no CORS headers, so the browser
+    # refuses to hand it the response.
+    app.add_middleware(CORSMiddleware, **get_settings().cors_middleware_options())
 
     def runtime() -> AgentRuntime:
         rt = state.get("runtime")
@@ -464,6 +495,11 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
                 state["wallet"].status() if state.get("wallet") else None
             ),
             "ans": state["ans"].status() if state.get("ans") else None,
+            # The Session State Synchronizer push as THIS process sees it.
+            "sessions": ({"received": state["sessions"].received,
+                          "locked_out": sorted(state["sessions"].locked),
+                          "self_locked_out": state["sessions"].is_locked(did)}
+                         if state.get("sessions") else None),
         }
 
     @app.get("/ready")
@@ -628,6 +664,48 @@ def create_agent_service(config: AgentServiceConfig) -> FastAPI:
             await rt.emit(EventType.COORDINATOR_DISCOVERY_FAILED,
                           reason=outcome.reason)
         return outcome.to_dict()
+
+    @app.post("/work")
+    async def work(request: Request) -> dict[str, Any]:
+        """Carry out ONE protected tool call that another agent asked for.
+
+        The instruction must be signed by its sender, fresh, never seen
+        before, and addressed to THIS agent. The tool must be in this agent's
+        own declared toolset. The call to the AEM is then made as THIS agent,
+        signed with its own key, and decided on its own credentials -- the
+        sender's authority is never borrowed. See app/workflows/peer.py.
+        """
+        from app.workflows.peer import InstructionRejected, enforce_as_self
+
+        verifier = state.get("instructions")
+        if verifier is None:
+            raise HTTPException(503, "Agent is not initialised")
+        sessions = state.get("sessions")
+        if sessions is not None and sessions.is_locked(did):
+            # Our own global session was terminated: stop at once, locally.
+            raise HTTPException(423, {"reason": "SESSION_TERMINATED_SECURITY_LOCKOUT",
+                                      "detail": "this agent's session is locked out"})
+        raw = await request.body()
+        try:
+            sender, body = await verifier.verify(request.headers, raw)
+        except InstructionRejected as exc:
+            await runtime().emit("INSTRUCTION_REJECTED", reason=exc.reason, detail=exc.detail)
+            raise HTTPException(401, {"reason": exc.reason, "detail": exc.detail}) from exc
+        if sessions is not None and sessions.is_locked(sender):
+            raise HTTPException(401, {"reason": "INSTRUCTION_SENDER_LOCKED_OUT",
+                                      "detail": f"{sender} is locked out by the Session Authority"})
+        tool = body.get("tool")
+        if tool not in definition.planned_tools:
+            raise HTTPException(403, {"reason": "TOOL_NOT_IN_TOOLSET",
+                                      "detail": f"{tool!r} is not in this agent's toolset"})
+        enforcement = await enforce_as_self(
+            request.app.state.iam, Signer(state["keystore"]), did=did, kid=state["kid"],
+            tool=tool, arguments=dict(body.get("arguments") or {}),
+            purpose=str(body.get("purpose") or ""), request_id=body.get("request_id"),
+            approval_id=body.get("approval_id"))
+        if enforcement.get("executed"):
+            enforcement["result"] = minimise(tool, enforcement.get("result"))
+        return {"agent": did, "instructed_by": sender, "enforcement": enforcement}
 
     @app.post("/a2a/send")
     async def a2a_send(body: A2ASendIn, request: Request) -> dict[str, Any]:

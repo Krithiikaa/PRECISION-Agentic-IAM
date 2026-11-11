@@ -34,6 +34,14 @@ os.environ["ENV"] = "test"
 # disabled when ENV=production -- so this convenience cannot reach a
 # deployment.
 os.environ["RATELIMIT_ENABLED"] = "false"
+# Phase 12 (found live). Redis pub/sub channels are GLOBAL across Redis
+# database numbers, and the suite's synthetic agents reuse real DIDs
+# (did:poc:agent:risk-001). On the shared default channel, every containment a
+# test performed was pushed to the LIVE development agents too: a running
+# risk-001 applied a test lockout to its local fast-fail view and refused work
+# (the authoritative PostgreSQL ledger was unaffected). The suite now pushes on
+# its own channel. This isolates environments; it weakens no control.
+os.environ["SSS_CHANNEL"] = "agentic-iam:sss:test-suite"
 os.environ["KEYSTORE_DIR"] = tempfile.mkdtemp(prefix="iam-test-keystore-")
 
 # Belt and braces: a destructive suite must never point at a database whose

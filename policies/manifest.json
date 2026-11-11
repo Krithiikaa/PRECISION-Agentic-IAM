@@ -79,6 +79,17 @@
       "status": "ACTIVE"
     },
     {
+      "policy_id": "loan-workflow-access",
+      "version": "v1",
+      "module_id": "agentic_iam/loan/workflow",
+      "source": "loan/workflow.rego",
+      "description": "Allow each loan-workflow specialist to reach exactly its own resource -- KYC records, fraud signals, loan documents, the risk model -- with a verified credential attesting the matching capability, for the loan_assessment purpose.",
+      "purpose": "Bound every specialist in the end-to-end loan workflow to its own row.",
+      "scope": "resource in {kyc_records, fraud_signals, loan_documents, risk_models}",
+      "owner": "lending",
+      "status": "ACTIVE"
+    },
+    {
       "policy_id": "resource-scope",
       "version": "v1",
       "module_id": "agentic_iam/loan/resource_scope",
@@ -109,6 +120,28 @@
       "purpose": "Mark actions that must not proceed on agent authority alone.",
       "scope": "action in {approve_loan, disburse_funds, override_decision}",
       "owner": "compliance",
+      "status": "ACTIVE"
+    },
+    {
+      "policy_id": "session-state",
+      "version": "v2",
+      "module_id": "agentic_iam/security/session",
+      "source": "security/session.rego",
+      "description": "Deny every request from an agent whose global session the Session Authority has terminated (TERMINATED_IMMEDIATE_SECURITY_LOCKOUT). The single rule that makes the kill switch effective across the direct API, MCP and A2A at once. v2 (Phase 12): also deny a delegated identity whose delegation chain has an ancestor that is not ACTIVE (suspended, terminated, expired or locked out).",
+      "purpose": "Enforce the Session State Synchronizer ledger at the PDP.",
+      "scope": "all authorization requests",
+      "owner": "platform-security",
+      "status": "ACTIVE"
+    },
+    {
+      "policy_id": "trust-adaptive",
+      "version": "v1",
+      "module_id": "agentic_iam/security/trust",
+      "source": "security/trust.rego",
+      "description": "Risk-adaptive enforcement from the Trust & Risk Engine: deny UNTRUSTED agents outright; escalate sensitive actions of REDUCED-trust agents to a human even inside the agent's own amount band. Only narrows.",
+      "purpose": "Continuous authorization: let observed behaviour tighten what an agent may do.",
+      "scope": "all authorization requests; escalation for approve_loan, disburse_funds, override_decision, execute_payment",
+      "owner": "platform-security",
       "status": "ACTIVE"
     },
     {

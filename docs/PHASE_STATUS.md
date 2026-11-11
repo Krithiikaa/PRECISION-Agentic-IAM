@@ -14,11 +14,17 @@ only when its behaviour works against the live system and is covered by tests.
 | 5.5 | HITL security hardening: amount-based authorization in Rego, amount in the approval binding, dual control, maker-checker, approval signing-key rotation, token storage, SSE approval updates | **✓ COMPLETE** · **✓ VERIFIED** |
 | 6  | Just-In-Time temporary access: signed time- and use-bounded mandates, policy-capped, revocable, re-decided on every use | **✓ COMPLETE** · **✓ VERIFIED** |
 | 7  | Secure A2A transactions: signed envelope, receiver binding, exactly-once execution, four-way amount reconciliation, PAYMENT_OFFICER HITL and real dual control | **✓ COMPLETE** · **✓ VERIFIED** |
-| 8  | MCP tool gateway | Not started |
-| 9  | Session Authority, Session State Synchroniser (Redis) | Not started |
-| 10 | Monitoring, audit UI, trust/risk engine, rule-based anomaly detection | Partial: event bus, audit trail and SSE stream exist; anomaly and trust do not |
-| 11 | Kill switch, global revocation, cross-protocol termination | Not started |
-| 12 | Frontend: topology, live trace, demo scenarios, SOC views | Partial: discovery and credentials consoles with the live trace exist; topology, loan UI and SOC views do not |
+| 8  | MCP tool gateway | **✓ COMPLETE** · **✓ VERIFIED** — documented subset of MCP 2025-06-18 |
+| 9  | Integration, security validation, release readiness (the original "Session Authority" scope moved to the framework-completion increment below) | **✓ COMPLETE** |
+| 10 | Production security hardening: authenticated reads, rate limiting, CORS, single-use presentations | **✓ COMPLETE** |
+| — | **Framework completion** against the CSA reference: trust & risk engine, rule-based anomaly detection, Session Authority + SSS + kill switch, delegated identities (sub-agent/ephemeral/fork), rich Agent ID profile, end-to-end loan workflow (simulated adapters), security-ops and workflow console tabs | **✓ IMPLEMENTED** — see [FRAMEWORK_COMPLETION_REPORT.md](FRAMEWORK_COMPLETION_REPORT.md) and [REQUIREMENTS_TRACEABILITY.md](REQUIREMENTS_TRACEABILITY.md) |
+
+This table previously listed Phases 8-12 as "not started" while the sections
+below described 8-10 as complete; it had not been updated after Phase 7. The
+original Phase 11 (kill switch, global revocation) and the trust/anomaly half
+of the original Phase 10 are delivered by the framework-completion increment.
+The original Phase 12 frontend scope is PARTIAL: workflow and security-ops
+views exist; topology and SOC dashboards beyond those do not.
 
 ## Audit status
 
@@ -118,7 +124,9 @@ version whose `site-packages` it does not share, so every entry point failed wit
 `ModuleNotFoundError`. Fixed by repointing `.venv/bin/python3` at
 `/usr/bin/python3.13`. No dependency was reinstalled and no code changed.
 
-Next: **nothing planned.** Phase 10 was the final engineering phase; see
+Next: the targets in FRAMEWORK_COMPLETION_REPORT.md §13 (W1-W3, plus items
+that need an external party). Previously this read "nothing planned"; Phase 10
+was the final hardening phase; see
 [PHASE_10_SECURITY_ASSESSMENT.md](PHASE_10_SECURITY_ASSESSMENT.md) for the
 final findings, [PRODUCTION_DEPLOYMENT.md](PRODUCTION_DEPLOYMENT.md) for
 deployment, and [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) for backup
@@ -863,3 +871,10 @@ Named here so nothing in the UI or the docs implies otherwise:
   for that: private keys never leave the store, callers only ever ask it to sign.
 - `did:poc:` is a POC method. The document shape follows W3C DID Core, but there
   is no resolver network and no registered method.
+
+---
+
+## Phase 12 — final phase (2026-11-11): COMPLETE for feasible scope
+
+Containment closes approvals and revalidates on reinstatement; tamper-evident audit (MAC + hash chain + signed checkpoints); durable loan workflow; configuration-driven CORS everywhere; delegation-chain enforcement. Gates 1–9 all pass, loan E2E 33/33, live restart 18/18. Console integration of the five Phase 12 features: new UI browser tests 57/57, existing console 31/31. Final full suite 1,615 passed / 0 failed / 1 skipped (live LLM test, host memory). Lint not run (no linter configured). No load test. External items BLOCKED_EXTERNAL. Details: [PHASE_12_FINAL_REPORT.md](PHASE_12_FINAL_REPORT.md).
+

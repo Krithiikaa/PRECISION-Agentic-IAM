@@ -45,14 +45,17 @@ from app.api.routes import (
     agents,
     audit,
     authorization,
+    console,
     credentials,
     events,
     health,
     hitl,
     identity,
     jit,
+    loan_workflows,
     loans,
     mcp,
+    security,
 )
 from app.core.config import DEV_MASTER_KEY, get_settings
 from app.core.errors import ConflictError, IdentityError, KeyStoreError, NotFoundError
@@ -89,6 +92,103 @@ async def _policy_reconciler(stop: asyncio.Event, interval: int = 15) -> None:
                 log.warning("policy_set_restored", **outcome)
         except Exception as exc:  # noqa: BLE001 - must not kill the loop
             log.error("policy_reconcile_failed", error=f"{type(exc).__name__}: {exc}")
+
+
+async def _anomaly_detector(stop: asyncio.Event, keystore, settings) -> None:
+    """Tail the audit trail for anomalies; push any session-state changes.
+
+    Several API workers may run this loop at once. The detector claims its
+    cursor with SKIP LOCKED, so exactly one of them processes a given batch
+    and the others skip the tick.
+    """
+    from app.agents.delegation import DelegationService
+    from app.sessions.sss import SessionStateSynchronizer
+    from app.trust.detector import AnomalyDetector
+
+    try:
+        async with session_scope() as session:
+            head = await AnomalyDetector(session, keystore, settings).start_from_head()
+        if head is not None:
+            log.info("anomaly_detector_cursor_initialised", starting_after_seq=head,
+                     note="history before this point is not replayed")
+    except Exception as exc:  # noqa: BLE001
+        log.error("anomaly_detector_init_failed", error=f"{type(exc).__name__}: {exc}")
+
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.anomaly_poll_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            async with session_scope() as session:
+                run = await AnomalyDetector(session, keystore, settings).run_once()
+            # Same tick: retire delegated identities whose lifetime is over,
+            # so no dormant ephemeral identity lingers (paper R-61).
+            async with session_scope() as session:
+                expired = await DelegationService(session, keystore, settings).expire_due()
+            if expired:
+                log.info("delegated_identities_expired", count=len(expired))
+            # Committed by session_scope; only now is it safe to push.
+            if run.changes:
+                async with session_scope() as session:
+                    sss = SessionStateSynchronizer(session, settings)
+                    for change in run.changes:
+                        await sss.publish(change)
+            for report in run.contained:
+                log.warning("automated_containment", agent=report.agent_did,
+                            incident=report.incident_id,
+                            ms=round(report.containment_ms, 2))
+        except Exception as exc:  # noqa: BLE001 - must not kill the loop
+            log.error("anomaly_detector_failed", error=f"{type(exc).__name__}: {exc}")
+
+
+async def _audit_integrity(stop: asyncio.Event, keystore, settings) -> None:
+    """Phase 12: seal committed audit events into the hash chain; verify it.
+
+    Sealing is a short transaction under an advisory lock (safe with several
+    workers). A full sweep runs at start-up so rows committed while the API
+    was down are chained, and verification runs on its own cadence. A failed
+    verification becomes an AUDIT_INTEGRITY_VIOLATION event and a CRITICAL
+    alert -- server-side, never a UI-only check.
+    """
+    from app.audit.chain import AuditChain
+    from app.monitoring.events import Event, EventType
+
+    loop = asyncio.get_running_loop()
+    full_sweep, next_verify = True, loop.time() + 30.0
+    while not stop.is_set():
+        try:
+            async with session_scope() as session:
+                result = await AuditChain(session, keystore, settings).seal(full_sweep=full_sweep)
+            if full_sweep:
+                log.info("audit_chain_resumed", head_index=result.head_index,
+                         sealed_on_start=result.sealed)
+            full_sweep = False
+            if loop.time() >= next_verify:
+                async with session_scope() as session:
+                    chain = AuditChain(session, keystore, settings)
+                    report = await chain.verify()
+                    if report.ok:
+                        from app.audit.service import AuditService
+                        await AuditService(session).record(Event(
+                            EventType.AUDIT_INTEGRITY_VERIFIED, decision="VERIFIED",
+                            metadata={"head_index": report.head_index,
+                                      "entries_checked": report.entries_checked,
+                                      "checkpoints_verified": report.checkpoints_verified}))
+                    else:
+                        await chain.report_violation(report)
+                next_verify = loop.time() + settings.audit_verify_interval_seconds
+                # Periodic full sweep: catches a transaction that committed
+                # later than the per-tick look-back window.
+                full_sweep = True
+        except Exception as exc:  # noqa: BLE001 - must not kill the loop
+            log.error("audit_integrity_failed", error=f"{type(exc).__name__}: {exc}")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=settings.audit_seal_interval_seconds)
+            return
+        except asyncio.TimeoutError:
+            pass
 
 
 @asynccontextmanager
@@ -212,12 +312,33 @@ async def lifespan(app: FastAPI):
         )
     stop = asyncio.Event()
     reconciler = asyncio.create_task(_policy_reconciler(stop))
+    background = [reconciler]
+    if settings.audit_sealer_enabled:
+        background.append(asyncio.create_task(_audit_integrity(stop, keystore, settings)))
+        log.info("audit_sealer_started", seal_seconds=settings.audit_seal_interval_seconds,
+                 verify_seconds=settings.audit_verify_interval_seconds)
+    else:
+        log.warning("audit_sealer_disabled", consequence="audit trail is not being chained")
+    if settings.anomaly_detector_enabled:
+        background.append(asyncio.create_task(_anomaly_detector(stop, keystore, settings)))
+        log.info("anomaly_detector_started", poll_seconds=settings.anomaly_poll_seconds,
+                 auto_containment=settings.auto_containment_enabled)
+    else:
+        log.warning("anomaly_detector_disabled",
+                    consequence="no alerts, no trust signals, no automated containment")
+        from app.trust.detector import AnomalyDetector
+        try:
+            async with session_scope() as session:
+                await AnomalyDetector(session, keystore, settings).suspend()
+        except Exception as exc:  # noqa: BLE001
+            log.error("anomaly_detector_suspend_failed", error=f"{type(exc).__name__}: {exc}")
     try:
         yield
     finally:
         stop.set()
-        reconciler.cancel()
-        await asyncio.gather(reconciler, return_exceptions=True)
+        for task in background:
+            task.cancel()
+        await asyncio.gather(*background, return_exceptions=True)
         await llm.aclose()
 
 
@@ -243,11 +364,7 @@ def create_app() -> FastAPI:
     settings = get_settings()
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
-        allow_credentials=settings.cors_allow_credentials,
-        allow_methods=settings.cors_methods,
-        allow_headers=settings.cors_headers,
-        max_age=settings.cors_max_age_seconds,
+        **settings.cors_middleware_options(),
     )
 
     # --- Phase 10: rate limiting -----------------------------------------
@@ -274,6 +391,9 @@ def create_app() -> FastAPI:
     # resource identifier (RFC 8707), so it is a fixed, documented path
     # rather than one that moves with API versioning.
     app.include_router(mcp.router)
+    app.include_router(security.router)
+    app.include_router(loan_workflows.router)
+    app.include_router(console.router)
     return app
 
 

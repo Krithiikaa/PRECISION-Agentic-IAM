@@ -8,12 +8,19 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.core.errors import ConflictError, IdentityError, KeyStoreError, NotFoundError
+from app.core.errors import (
+    ConflictError,
+    IdentityError,
+    KeyStoreError,
+    NotFoundError,
+    ValidationError,
+)
 
 ERROR_STATUS: list[tuple[type[Exception], int, str]] = [
     (NotFoundError, 404, "NOT_FOUND"),
     (ConflictError, 409, "CONFLICT"),
     (IdentityError, 400, "IDENTITY_ERROR"),
+    (ValidationError, 422, "VALIDATION_ERROR"),
     (KeyStoreError, 500, "KEYSTORE_ERROR"),
 ]
 

@@ -61,6 +61,12 @@ class AgentSpec:
     # registering only the public half. The registry then never holds, and never
     # could hold, that agent's private key.
     public_key_multibase: str | None = None
+    # The rich Agent ID profile (app/identity/profile.py), published in the
+    # DID Document. Optional so every existing caller is unchanged.
+    profile: dict | None = None
+    # How a child relates to `parent_did`: DELEGATES (sub-agent, ephemeral)
+    # or FORKED_FROM (a copy). Ignored without a parent.
+    relationship_type: str = "DELEGATES"
 
 
 class AgentRegistry:
@@ -176,6 +182,7 @@ class AgentRegistry:
                 capabilities=list(spec.capabilities),
                 status=AgentStatus.ACTIVE.value,
                 parent_did=parent.did if parent else None,
+                profile=spec.profile,
             )
             await self.repo.upsert_did_document(agent.id, did, document)
 
@@ -183,7 +190,7 @@ class AgentRegistry:
                 await self.repo.add_relationship(
                     parent_agent_id=parent.id,
                     child_agent_id=agent.id,
-                    relationship_type="DELEGATES",
+                    relationship_type=spec.relationship_type,
                     expires_at=expires_at,
                 )
 
@@ -272,6 +279,57 @@ class AgentRegistry:
                       metadata={"agent_id": str(agent.id), "status": status.value})
             )
         return agent
+
+    async def update_endpoint(self, did: str, endpoint: str, reason: str) -> int:
+        """Point an agent's DID Document at a new service endpoint (paper R-95).
+
+        Moving where an agent is reached redirects every peer that resolves
+        it, so this is an identity-administrator operation, audited with the
+        old and new value, and it republishes the document with a new version.
+        Discovery cross-checks the ANS endpoint against THIS value, so the two
+        must agree before an agent can be selected.
+        """
+        agent = await self.get_agent(did)
+        record = await self.repo.get_did_document(did)
+        if record is None:
+            raise NotFoundError(f"{did} has no DID Document")
+        previous = agent.endpoint
+        document = dict(record.document)
+        document["service"] = [{"id": f"{did}#agent-api", "type": "AgentService",
+                                "serviceEndpoint": endpoint}]
+        updated = await self.repo.upsert_did_document(agent.id, did, document)
+        agent.endpoint = endpoint
+        await self.session.flush()
+        await self.audit.record(Event(
+            EventType.DID_DOCUMENT_PUBLISHED, agent_did=did, reason=reason,
+            metadata={"version": updated.version, "previous_endpoint": previous,
+                      "endpoint": endpoint}))
+        return updated.version
+
+    async def update_profile(self, did: str, profile: dict, reason: str) -> int:
+        """Republish the DID Document with a new Agent ID profile (paper R-95).
+
+        Every change bumps the document version, and the event records the old
+        and new model hash, so a swapped model or prompt is visible as a
+        version change on the identity rather than a silent edit.
+        """
+        agent = await self.get_agent(did)
+        record = await self.repo.get_did_document(did)
+        if record is None:
+            raise NotFoundError(f"{did} has no DID Document")
+        document = dict(record.document)
+        metadata = dict(document.get("agentMetadata") or {})
+        previous = ((metadata.get("profile") or {}).get("model") or {}).get("hash", {})
+        metadata["profile"] = profile
+        document["agentMetadata"] = metadata
+        updated = await self.repo.upsert_did_document(agent.id, did, document)
+        agent.agent_metadata = {**(agent.agent_metadata or {}), "profile": profile}
+        await self.audit.record(Event(
+            EventType.DID_DOCUMENT_PUBLISHED, agent_did=did, reason=reason,
+            metadata={"version": updated.version,
+                      "previous_model_hash": previous.get("value"),
+                      "model_hash": ((profile.get("model") or {}).get("hash") or {}).get("value")}))
+        return updated.version
 
     async def terminate(self, did: str, reason: str = "OPERATOR_REQUEST") -> Agent:
         """Terminate the agent and destroy its signing key.

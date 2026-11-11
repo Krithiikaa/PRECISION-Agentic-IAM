@@ -229,6 +229,77 @@ resurrect a policy you switched off.
 
 ---
 
+## 5a. Audit integrity (Phase 12)
+
+The audit trail is **tamper-evident**, not immutable. Mechanism and limits:
+`backend/app/audit/integrity.py` (docstring) and `docs/PHASE_12_FINAL_REPORT.md` §B.
+
+### Routine
+
+```bash
+# Server-side verdict (needs audit_read: identity admin or AUDITOR):
+GET /api/v1/audit/integrity
+# Checkpoints and the checkpoint public key, for external anchoring:
+GET /api/v1/audit/integrity/checkpoints
+
+# Independent verification, outside the API, read-only, with a PINNED key:
+cd backend && set -a && . ../.env && set +a
+python3 ../scripts/verify_audit_chain.py --public-key <b64 key recorded earlier> \
+    --check-macs --expect-checkpoint <index>:<entry_hash recorded earlier>
+```
+
+**Anchor externally.** At least daily, copy the latest checkpoint
+(`chain_index`, `entry_hash`) and the public key to a system the database
+administrators cannot write (ticket, WORM bucket, signed e-mail). Truncation
+of the chain *together with* its checkpoints is only detectable against such
+a copy (`--expect-checkpoint`).
+
+### When `AUDIT_INTEGRITY` raises a CRITICAL alert
+
+1. **Do not "fix" the chain.** Never delete, update or re-seal rows; the
+   tables carry an append-only trigger and that is deliberate.
+2. Preserve evidence: `pg_dump -Fc` the database and copy the IAM API logs
+   (they contain every `audit_checkpoint_signed` line).
+3. Run `verify_audit_chain.py --json` with the pinned key and every
+   externally retained checkpoint. The finding kinds say what happened:
+   `EVENT_MODIFIED`/`EVENT_MAC_INVALID` (edited), `EVENT_DELETED`,
+   `CHAIN_GAP`/`CHAIN_LINK_BROKEN` (rows removed or reordered),
+   `EVENT_MAC_MISSING` (row inserted outside the application),
+   `CHECKPOINT_MISMATCH` (chain rewritten or truncated), `UNSEALED_STALE`
+   (sealer down — check `audit_integrity_failed` in the API log first).
+4. Treat confirmed tampering as a database-credential compromise: rotate the
+   database credentials and, if MAC findings exist, assume
+   `KEYSTORE_MASTER_KEY` exposure (§4).
+5. The alert is de-duplicated per finding set; a new finding set raises a new
+   alert.
+
+### Migration note
+
+Migration `d12a0c4e7b51` writes the genesis entry. **Run it with the
+application stopped** (as `scripts/run_local.sh` does). Rows that existed
+before it are recorded as `legacy_events_not_covered` and reported as
+"before coverage" by every verification — they are never claimed as verified.
+
+---
+
+## 5b. Kill switch playbook (Phase 12)
+
+| Step | Action | Who |
+|---|---|---|
+| 1 | Preview the blast radius: `GET /api/v1/security/impact/{did}` | SOC / identity admin |
+| 2 | Contain: `POST /api/v1/security/incidents` with `agent_did`, a justification (≥10 chars) and `revoke_credentials` only if key or credential theft is suspected (irreversible) | identity admin or `iam.admin` |
+| 3 | Verify: the response lists `session_state`, `identity`, `jit_grants_revoked`, `mcp_sessions_revoked`, `approvals_cancelled`, `ans`, `cascaded_to`; `sss_push.subscribers` should equal the number of running agents | same |
+| 4 | Investigate with the frozen impact snapshot (`GET /api/v1/security/incidents/{id}`) and the audit trail by `agent_did` / `request_id` | SOC |
+| 5 | Reinstate only with a written review (≥20 chars) by a **different principal**. Revalidation refuses a terminated or expired identity, one with no ACTIVE key, or one whose delegation ancestor is still contained — reinstate parents first | a second administrator |
+| 6 | Restart the agent process so it re-confirms identity and re-registers with the ANS; re-issue any credentials revoked in step 2 | platform operator |
+
+Containment withdraws pending and approved-but-unspent human approvals; they
+must be requested again after reinstatement. It does not affect any other
+agent. Gate sweeps can legitimately auto-contain `risk-001`; see §5 of the
+framework report.
+
+---
+
 ## 6. What is verified, and what is not
 
 | Claim | Evidence |

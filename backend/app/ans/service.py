@@ -310,11 +310,8 @@ def create_ans_app() -> FastAPI:
         version="0.3.0",
         lifespan=lifespan,
     )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://localhost:3000"],
-        allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-    )
+    # Phase 12: the shared, validated CORS configuration (was a literal).
+    app.add_middleware(CORSMiddleware, **get_settings().cors_middleware_options())
 
     install_error_handlers(app)
 

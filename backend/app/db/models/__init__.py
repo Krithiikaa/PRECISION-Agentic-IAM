@@ -5,6 +5,14 @@ from app.db.models.a2a import (
     A2ATransactionStatus,
 )
 from app.db.models.challenge import PresentationChallenge
+from app.db.models.security import (  # noqa: F401
+    AgentSessionState,
+    AgentTrust,
+    DetectorCursor,
+    SecurityAlert,
+    SecurityIncident,
+    TrustSignal,
+)
 from app.db.models.mcp import (
     MCPInvocation,
     MCPInvocationStatus,
@@ -30,7 +38,13 @@ from app.db.models.ans import (
     ANSRegistrationProof,
     ANSStatus,
 )
-from app.db.models.audit import AuditEvent
+from app.db.models.audit import AuditChainEntry, AuditCheckpoint, AuditEvent
+from app.db.models.loan import (
+    LoanApplicationRecord,
+    LoanDocumentRecord,
+    LoanWorkflowRecord,
+    LoanWorkflowTransition,
+)
 from app.db.models.authorization import (
     AuthorizationDecisionRecord,
     PolicyRecord,
@@ -84,7 +98,13 @@ __all__ = [
     "AgentType",
     "DIDDocument",
     "KeyStatus",
+    "AuditChainEntry",
+    "AuditCheckpoint",
     "AuditEvent",
+    "LoanApplicationRecord",
+    "LoanDocumentRecord",
+    "LoanWorkflowRecord",
+    "LoanWorkflowTransition",
     "AuthorizationDecisionRecord",
     "PolicyRecord",
     "PolicyStatus",
@@ -118,4 +138,10 @@ __all__ = [
     "CredentialVerificationEvent",
     "IssuerIdentity",
     "IssuerStatus",
+    "AgentSessionState",
+    "AgentTrust",
+    "DetectorCursor",
+    "SecurityAlert",
+    "SecurityIncident",
+    "TrustSignal",
 ]

@@ -127,6 +127,40 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return f"ip:{forwarded.split(',')[0].strip()}"
         return f"ip:{peer or 'unknown'}"
 
+    @staticmethod
+    def claimed_identity(request) -> str | None:
+        """The identity a request CLAIMS, before authentication has run.
+
+        DEFECT THIS EXISTS FOR (found when nine agents on one host starved
+        each other): the middleware runs BEFORE the authentication guard, so
+        `control_plane_principal` is never set here and `client_identifier`
+        fell back to the peer address for EVERY request. Everything on one
+        host shared one bucket; the documented per-identity keying never ran.
+
+        The claim is UNVERIFIED, so it is never trusted alone: a claimed
+        identity gets its own bucket, but every request is ALSO counted
+        against its address with a higher ceiling (see `dispatch`). Inventing
+        identities therefore buys at most the address ceiling, not an
+        unlimited allowance.
+        """
+        principal = getattr(request.state, "control_plane_principal", None)
+        verified = getattr(principal, "did", None) or getattr(principal, "username", None)
+        if verified:
+            return verified
+        claimed = request.headers.get("x-cp-principal")
+        if (claimed and claimed.startswith("did:") and len(claimed) <= 255
+                and all(ch.isalnum() or ch in ":._-" for ch in claimed)):
+            return claimed
+        return None
+
+    def address_identifier(self, request) -> str:
+        peer = request.client.host if request.client else None
+        if self._trusted_proxy(peer):
+            forwarded = request.headers.get("x-forwarded-for")
+            if forwarded:
+                return f"ip:{forwarded.split(',')[0].strip()}"
+        return f"ip:{peer or 'unknown'}"
+
     async def dispatch(self, request, call_next):
         if not self.settings.ratelimit_enabled:
             return await call_next(request)
@@ -139,8 +173,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         limit, window = self.settings.ratelimit_tiers[tier]
         rule = RateLimitRule(name=tier, limit=limit, window_seconds=window)
 
-        key = self.client_identifier(request)
-        decision = await self.limiter.check(key, rule)
+        identity = self.claimed_identity(request)
+        address = self.address_identifier(request)
+        if identity:
+            # Two counters: the identity at the tier's limit, and the address
+            # at `ratelimit_address_multiplier` times it. Either refusing is a
+            # refusal; the address ceiling bounds invented identities.
+            ceiling = RateLimitRule(name=f"{tier}-address",
+                                    limit=limit * self.settings.ratelimit_address_multiplier,
+                                    window_seconds=window)
+            key = f"id:{identity}"
+            decision = await self.limiter.check(address, ceiling)
+            if decision.allowed:
+                decision = await self.limiter.check(key, rule)
+            else:
+                key = address
+        else:
+            key = address
+            decision = await self.limiter.check(key, rule)
 
         if not decision.allowed:
             log.warning(

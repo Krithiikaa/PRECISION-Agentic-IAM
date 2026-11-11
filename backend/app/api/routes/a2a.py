@@ -159,7 +159,14 @@ async def list_transactions(
     elif receiver_did:
         records = await service.for_receiver(receiver_did, limit=limit)
     else:
-        raise NotFoundError("Supply either sender_did or receiver_did.")
+        # The operations console's ledger view: every transaction, newest
+        # first, under the same `grant_read` guard.
+        from sqlalchemy import select
+
+        from app.db.models.a2a import A2ATransaction
+        records = (await session.execute(
+            select(A2ATransaction).order_by(A2ATransaction.created_at.desc()).limit(limit)
+        )).scalars().all()
     return [r.to_dict() for r in records]
 
 

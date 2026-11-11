@@ -115,22 +115,44 @@ class TestCredentialFactsComeFromPhase2:
 
 
 class TestNothingIsInvented:
-    async def test_trust_score_is_null_not_a_number(
-        self, pip, issued_credential, risk_agent, authz_request
+    async def test_trust_is_a_computed_verdict_not_a_default(
+        self, pip, session, issued_credential, risk_agent, authz_request
     ):
-        """Phase 10 owns trust. A default here would authorise on a number
-        nobody computed."""
-        context = await pip.collect(authz_request(risk_agent.did))
-        assert context.trust_score is None
-        assert "trust_score" in context.unavailable
-        assert "Phase 10" in context.unavailable["trust_score"]
+        """TRUST ENGINE UPDATE (same discipline as the Phase 5 update below).
 
-    async def test_session_is_null_and_named(
-        self, pip, issued_credential, risk_agent, authz_request
-    ):
+        `trust_score` used to be NULL and listed as unavailable, because no
+        trust engine existed. It is now computed from recorded signals. The
+        discipline is unchanged: the number is DERIVED (100 minus unexpired
+        signal weights), never defaulted, and it moves only when a recorded
+        signal moves it.
+        """
+        from app.trust.engine import TrustEngine
+
         context = await pip.collect(authz_request(risk_agent.did))
-        assert context.session is None
-        assert "session" in context.unavailable
+        assert context.trust == {"score": 100, "level": "TRUSTED", "active_signals": 0}
+        await TrustEngine(session).record_signal(risk_agent.did, "SCOPE_VIOLATION", 15)
+        context = await pip.collect(authz_request(risk_agent.did))
+        assert context.trust["score"] == 85 and context.trust["active_signals"] == 1
+        assert "trust_score" not in context.unavailable
+
+    async def test_session_is_the_ledger_state_not_a_default(
+        self, pip, session, issued_credential, risk_agent, authz_request
+    ):
+        """No ledger row means the Session Authority never changed this
+        agent's session: ACTIVE at version 0 is that fact, stated. A real
+        lockout is reported as one."""
+        from app.db.models.security import SessionState
+        from app.sessions.sss import SessionStateSynchronizer
+
+        context = await pip.collect(authz_request(risk_agent.did))
+        assert context.session["state"] == "ACTIVE" and context.session["version"] == 0
+        await SessionStateSynchronizer(session).set_state(
+            risk_agent.did, SessionState.TERMINATED_IMMEDIATE_SECURITY_LOCKOUT,
+            reason="test", changed_by="test", incident_id="inc-1")
+        context = await pip.collect(authz_request(risk_agent.did))
+        assert context.session["state"] == "TERMINATED_IMMEDIATE_SECURITY_LOCKOUT"
+        assert context.session["incident_id"] == "inc-1"
+        assert "session" not in context.unavailable
 
     async def test_approval_is_a_verdict_not_a_default(
         self, pip, issued_credential, risk_agent, authz_request
@@ -156,12 +178,13 @@ class TestNothingIsInvented:
     async def test_unavailable_attributes_are_serialised_for_policy(
         self, pip, issued_credential, risk_agent, authz_request
     ):
+        """What is still NOT computed is still named as such: there is no ML
+        anomaly score, and the document says so rather than inventing one."""
         body = (await pip.collect(authz_request(risk_agent.did))).to_dict()
-        assert body["trust_score"] is None
-        assert body["session"] is None
-        assert set(body["unavailable"]) >= {"trust_score", "session"}
-        # Phase 5: approval is serialised as a VERDICT for policy, never null.
-        assert body["approval"]["present"] is False
+        assert body["trust"]["level"] == "TRUSTED"
+        assert body["trust_score"] == 100
+        assert body["session"]["state"] == "ACTIVE"
+        assert set(body["unavailable"]) == {"ml_anomaly_score"}
 
 
 class TestContextShape:
@@ -184,3 +207,46 @@ class TestContextShape:
     async def test_collection_is_timed(self, pip, risk_agent, authz_request):
         context = await pip.collect(authz_request(risk_agent.did))
         assert context.collection_ms > 0
+
+
+class TestCredentialHistoryDoesNotSlowDecisions:
+    """REGRESSION. The PIP verified every credential a subject had EVER held.
+    With cumulative seeding risk-001 reached 476 (most revoked or expired) and
+    one decision took ~3 s -- longer than a 2-second JIT mandate lives."""
+
+    async def _history(self, credential_issuer, risk_agent, issuer_did, capability_claims, n=6):
+        from app.credentials.issuer import IssueRequest
+        from app.credentials.status import CredentialStatusService
+        for _ in range(n):
+            vc = await credential_issuer.issue(IssueRequest(
+                issuer_did=issuer_did, subject_did=risk_agent.did,
+                credential_type="AgentCapabilityCredential", claims=capability_claims,
+                ttl_seconds=3600))
+            await CredentialStatusService(credential_issuer.session).revoke(vc.credential_id, "old")
+
+    async def test_only_live_credentials_are_verified_when_one_is_valid(
+        self, pip, credential_issuer, issued_credential, risk_agent, issuer_did,
+        capability_claims, authz_request
+    ):
+        await self._history(credential_issuer, risk_agent, issuer_did, capability_claims)
+        context = await pip.collect(authz_request(risk_agent.did))
+        assert [f.credential_id for f in context.credentials] == [issued_credential.credential_id]
+        assert context.credentials[0].valid
+
+    async def test_with_nothing_live_the_full_history_is_still_verified(
+        self, pip, credential_issuer, risk_agent, issuer_did, capability_claims, authz_request
+    ):
+        """The diagnostic denial reasons (REVOKED / EXPIRED) need the history,
+        and they still get it -- decisions are unchanged."""
+        await self._history(credential_issuer, risk_agent, issuer_did, capability_claims, n=3)
+        context = await pip.collect(authz_request(risk_agent.did))
+        assert len(context.credentials) == 3
+        assert all(f.reason == "CREDENTIAL_REVOKED" for f in context.credentials)
+
+    async def test_the_decision_with_history_is_still_allow(
+        self, pdp, credential_issuer, issued_credential, risk_agent, issuer_did,
+        capability_claims, authz_request
+    ):
+        from app.authorization.contracts import Decision
+        await self._history(credential_issuer, risk_agent, issuer_did, capability_claims)
+        assert (await pdp.decide(authz_request(risk_agent.did))).decision is Decision.ALLOW

@@ -278,6 +278,54 @@ OPERATIONS: dict[str, ControlPlaneOperation] = {
         "Read loan applications, including applicant and amount.",
         "loan_application",
     ),
+
+    # --- Session Authority: the kill switch and its reversal --------------
+    # HIGH_RISK because containment takes an agent out of service across
+    # every protocol at once, and reinstatement puts a once-suspect agent
+    # back. Both sit with the identity administrator, who already holds
+    # `agent_status_change`; neither grants anything that role lacked.
+    "incident_contain": ControlPlaneOperation(
+        "incident_contain", ControlPlaneClass.HIGH_RISK_ADMINISTRATION,
+        "Contain an agent: lock out its global session, suspend it, revoke "
+        "its mandates and protocol sessions, remove it from discovery.",
+        "identity",
+    ),
+    "incident_reinstate": ControlPlaneOperation(
+        "incident_reinstate", ControlPlaneClass.HIGH_RISK_ADMINISTRATION,
+        "Reinstate a contained agent after a written post-incident review.",
+        "incident",
+    ),
+    # A parent agent creating a delegated identity (sub-agent, ephemeral
+    # agent or fork). AUTHORIZED, not merely authenticated: an agent may
+    # spawn only on its own behalf (cp-agent-self), and the identity
+    # administrator may spawn for any agent. What a spawn may CONTAIN is
+    # enforced by app/agents/delegation.py: never more than the parent can
+    # prove with its own verified credentials.
+    "agent_spawn": ControlPlaneOperation(
+        "agent_spawn", ControlPlaneClass.AUTHORIZED_MUTATION,
+        "Create a delegated identity whose authority is a subset of the "
+        "parent's verified credentials.", "identity",
+    ),
+    # Publishing an agent's Agent ID profile (model hash, scope, toolset).
+    # HIGH_RISK: the profile is what an auditor compares behaviour against,
+    # so rewriting it is as consequential as changing the agent itself.
+    "agent_profile_publish": ControlPlaneOperation(
+        "agent_profile_publish", ControlPlaneClass.HIGH_RISK_ADMINISTRATION,
+        "Publish an agent's Agent ID profile into its DID Document.", "identity",
+    ),
+    # A bank employee submitting a customer's loan application into the
+    # end-to-end workflow (blueprint steps 1-2). A HUMAN operation: the
+    # authenticated officer becomes the application's officer of record,
+    # which is what maker-checker later compares the approver against.
+    "loan_workflow_submit": ControlPlaneOperation(
+        "loan_workflow_submit", ControlPlaneClass.AUTHORIZED_MUTATION,
+        "Submit a loan application into the agent workflow.", "loan_application",
+    ),
+    "anomaly_scan": ControlPlaneOperation(
+        "anomaly_scan", ControlPlaneClass.AUTHORIZED_MUTATION,
+        "Run the anomaly detector over unprocessed audit events now.",
+        "audit",
+    ),
 }
 
 # A resolver returns either a bare id, or a dict of target attributes when

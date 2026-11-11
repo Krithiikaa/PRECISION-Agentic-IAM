@@ -49,6 +49,10 @@ import uuid
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "backend"))
+sys.path.insert(0, str(REPO / "scripts"))
+# For its rate-limit handling (honours Retry-After) and keystore-path
+# resolution; this gate's own signing is unchanged.
+import cp_sign  # noqa: E402,F401
 
 from app.core.config import get_settings  # noqa: E402
 from app.identity.keys import build_keystore  # noqa: E402
